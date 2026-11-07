@@ -62,6 +62,7 @@ void log_msg(LogLevel lv, const char* fmt, ...) __attribute__((format(printf, 2,
 extern bool g_log_trace;
 [[noreturn]] void fatal(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 s32 rsx_refs_behind();   // hle_gcm.cpp: how far the PPU is ahead of the RSX (reference steps)
+void rsx_ref_wait();     // hle_gcm.cpp: wait for the RSX to move its reference (or 1 ms)
 extern std::atomic<bool> g_rsx_starting;   // rsx.cpp: the renderer runs its start-up phase on the RSX thread (OpenGL shaders)
 
 // ------------------------------------------------------------------ memory
@@ -196,6 +197,8 @@ u64 time_usec();          // monotonic microseconds since start
 extern const u64 g_tsc_scale;   // microseconds per tick, 32.32 fixed point
 FORCE_INLINE u64 prof_usec() { return (u64)(((unsigned __int128)__rdtsc() * g_tsc_scale) >> 32); }
 void sleep_usec(u64 us);
+void sleep_until_precise(u64 t);   // core.cpp: until time_usec() == t, without the ~2 ms overshoot of sleep_for
+void raise_thread_priority();   // core.cpp: threads on the frame's critical path (F1CE_PRIO=0: off)
 u64 process_cpu_usec();   // user + kernel time of all threads
 // Wait of a polling thread with nothing to do: short waits (they spin, for latency) until it has been idle for 3 ms, then
 // a real sleep. Under load the idle spells are shorter, so the 1 ms of latency only applies in menus and pauses.

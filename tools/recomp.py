@@ -26,7 +26,16 @@ CHUNK = 400
 HOOKS = {0x3FB310: "camera_projection_hook",   # camera projection and frustum, see runtime/hle_aspect.cpp
          0x2F0D14: "cube_render_hook", 0x2F3B34: "cube_render2_hook", 0x2F0390: "cube_wait_hook",   # hle_cubemap.cpp
          0x2F141C: "skip_2f141c_hook", 0x2F1BEC: "skip_2f1bec_hook", 0x43F620: "skip_43f620_hook",   # hle_skipfn.cpp
-         0x43FFA0: "skip_43ffa0_hook", 0x30388C: "skip_30388c_hook"}
+         0x43FFA0: "skip_43ffa0_hook", 0x30388C: "skip_30388c_hook",
+         0x48F88: "boot_language_hook", 0x1FE0EC: "boot_init_hook",   # hle_boot.cpp
+         0x1F9EBC: "boot_attract_hook",
+         0x11C150: "tyre_forces_hook", 0x117ED0: "wheel_update_hook",
+         0x17B200: "car_tick_hook",   # hle_physics.cpp
+         0x3574C0: "controller_update_hook"}   # hle_rumble.cpp
+# debug probes: runtime code called with the context before the instruction at that address
+PROBES = {0x1187EC: "probe_1187ec", 0x11B05C: "probe_11b05c",   # hle_physics.cpp
+          0x489AAC: "flip_label_written",   # hle_gcm.cpp: the flip handler set a label the RSX may wait for
+          0x48B054: "put_written"}   # hle_gcm.cpp: libgcm wrote PUT
 SPIN_LOOPS = {0x551228, 0x5513BC}   # the job manager's waits: they only poll counters the SPUs write
 
 LOAD_INT = {  # mnemonic: (size, signed, update, indexed)
@@ -169,6 +178,9 @@ class FuncGen:
         if self.start in HOOKS:   # runtime code that may take the function over
             out.insert(0, f"bool {HOOKS[self.start]}(PPUContext& c);")
             out.append(f"\tif ({HOOKS[self.start]}(c)) return;")
+        for pa in sorted(PROBES):
+            if self.start <= pa < self.end:
+                out.insert(0, f"void {PROBES[pa]}(PPUContext& c);")
         for a, code, m in body:
             if a in self.labels or self.dispatch_all:
                 out.append(f"L_{a:X}:")
@@ -176,6 +188,8 @@ class FuncGen:
                 out.append("\tPPU_SPIN();")
             elif a in self.loop_heads or self.dispatch_all:
                 out.append("\tPPU_LOOP();")
+            if a in PROBES:
+                out.append(f"\t{PROBES[a]}(c);")
             out.append(f"\t{code}")
         if tail:
             out.append(f"\t{tail}")

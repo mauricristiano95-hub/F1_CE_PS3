@@ -11,10 +11,13 @@
 // memory snapshots while changing the menu): +0x14 track index (2006 calendar order), +0x6C race distance (float
 // fraction), +0x70 the Difficulty screen as bits (below), +0x6A80 / +0x6A98 driver and team id strings ({length,
 // data, 0, begin, end, capacity end}, 16-byte buffers). The values are written on every pad read until the first 3D
-// scene after them (the race), so the menu may show other choices than the race uses.
+// scene after them (the race), so the menu may show other choices than the race uses. A setting the player changes in
+// the menu is no longer overridden (the menu wins): a change counts as the player's when a d-pad direction or the left
+// stick moved in the 2 s before it (the game also writes these values itself, e.g. the profile's last race).
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <string>
 
 #include "kernel.h"
@@ -116,9 +119,32 @@ bool set_string(u32 obj, const char* s) {
     st32(obj + 16, begin + (u32)n + 1);
     return true;
 }
+std::string get_string(u32 obj) {
+    u32 n = ld32(obj), begin = ld32(obj + 12);
+    if (n > 64 || begin < 0x10000) return {};
+    return std::string((const char*)gmem(begin), n);
+}
+
+u64 g_last_steer = 0;   // time_usec() of the last d-pad direction / stick movement
+
+// One overridden setting: the override ends when the value changes to something else right after the player moved in
+// the menu; other changes are the game's own and are overwritten again.
+template <class T> struct Kept {
+    bool on = true;
+    bool keep(const T& cur, const T& want, const char* what) {
+        if (!on) return false;
+        if (cur != want && g_last_steer && time_usec() - g_last_steer < 2000000) {
+            on = false;
+            LOG_I("quick race override: %s changed in the game menu, the menu's choice is used", what);
+        }
+        return on;
+    }
+};
 }  // namespace
 
-void quick_race_overrides() {
+void quick_race_overrides(u32 digital1, u32 lx, u32 ly) {
+    // d-pad left/down/right/up (0x80/0x40/0x20/0x10), left stick away from the centre
+    if ((digital1 & 0xF0) || lx < 0x40 || lx > 0xC0 || ly < 0x40 || ly > 0xC0) g_last_steer = time_usec();
     static const Choice c = parse();
     static const char* poke = getenv("F1CE_QR_POKE");   // experiment: <offset>:<hex value> written like the others
     static bool applied = false, done = false;
@@ -129,10 +155,25 @@ void quick_race_overrides() {
     }
     u32 s = ld32(kSettingsPtr);
     if (s < 0x30000000 || s >= 0x40000000 || ld32(s + 0x14) >= 18) return;   // not created yet
-    if (c.track >= 0) st32(s + 0x14, (u32)c.track);
-    if (c.distance > 0) { u32 f; memcpy(&f, &c.distance, 4); st32(s + 0x6C, f); }
-    if (c.bits_mask) st32(s + 0x70, (ld32(s + 0x70) & ~c.bits_mask) | c.bits);
-    if (c.driver && !(set_string(s + 0x6A80, c.driver->id) && set_string(s + 0x6A98, c.driver->team))) {
+    static Kept<u32> track, distance, fields[std::size(kFields)];
+    static Kept<std::string> driver;
+    if (c.track >= 0 && track.keep(ld32(s + 0x14), (u32)c.track, "circuit")) st32(s + 0x14, (u32)c.track);
+    if (c.distance > 0) {
+        u32 f;
+        memcpy(&f, &c.distance, 4);
+        if (distance.keep(ld32(s + 0x6C), f, "race distance")) st32(s + 0x6C, f);
+    }
+    if (c.bits_mask) {
+        u32 v = ld32(s + 0x70);
+        for (size_t i = 0; i < std::size(kFields); i++) {
+            const Field& f = kFields[i];
+            if (!(c.bits_mask & f.mask) || !fields[i].keep(v & f.mask, c.bits & f.mask, f.env + 8)) continue;
+            v = (v & ~f.mask) | (c.bits & f.mask);
+        }
+        st32(s + 0x70, v);
+    }
+    if (c.driver && driver.keep(get_string(s + 0x6A80), c.driver->id, "driver") &&
+        !(set_string(s + 0x6A80, c.driver->id) && set_string(s + 0x6A98, c.driver->team))) {
         static bool warned = false;
         if (!warned) LOG_W("quick race override: driver strings not where expected");
         warned = true;

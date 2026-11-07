@@ -23,6 +23,7 @@ executable reads your own `PS3_GAME` folder at runtime.
 | `runtime/spu_ops.h` | SPU instruction semantics (one template handler per instruction), shared by the interpreter and the translated code |
 | `tools/spu_aot.py` | ahead-of-time SPU translation: recorded blocks → C++ in `generated/spu/` (single blocks + linked clusters) |
 | `runtime/hle_spurs.cpp` | host SPURS kernel running the game's SPU policy module |
+| `runtime/spu_pm.cpp` | the job manager policy module's hot functions rewritten in C++ (buffer lists, DMA info, buffer release, job end, job queue, interrupt entry) |
 | `runtime/hle_gcm.cpp` | RSX FIFO front end (jumps/calls, semaphores, labels, reports, flips) |
 | `runtime/rsx_gl.cpp` | OpenGL 3.3 renderer: RSX vertex/fragment programs → GLSL, textures, blending |
 | `runtime/host_sdl.cpp` | SDL3 window, keyboard/gamepad input, audio output |
@@ -58,7 +59,7 @@ f1ce <path-to>/PS3_GAME [--trace]
 ```
 
 Or use `build-win/f1ce_launcher.exe`: it sets the display and speed options below, remembers them in
-`build-win/f1ce_launcher.ini` and starts the game from the folder above `build-win/`, without a console; its Advanced tab sets the Quick Race settings (`F1CE_QR_*` below).
+`build-win/f1ce_launcher.ini` and starts the game from the folder above `build-win/`, without a console. Tabs: General (Video Settings, Game Settings), Quick Race Settings (`F1CE_QR_*` below) and Developer Tools (the debugging variables below, grouped, each with its description as a tooltip; value fields; "Other variables" takes any `NAME=value` list).
 
 A 1280x720 window opens. Log in `f1ce_recomp.log`, saves in `ps3_data/` (both in the current folder).
 The console shows warnings and errors only; the log file has everything (`F1CE_LOG_CONSOLE=1` prints every line,
@@ -81,10 +82,13 @@ Keyboard: arrows = d-pad, **Z** = ✕, **X** = ◯, **A** = □, **S** = △, **
 | `F1CE_FP_STOP=<i>:<reg>` + `F1CE_FP_STOP_HASH=<fp hash>` | outputs a register (`R3`, `H0`, `v2`, `c`, `C0`) right after instruction i of one fragment program; `F1CE_FP_STOP_SCALE`, `F1CE_FP_STOP_NAN` |
 | `F1CE_FP_DEBUG=t` | shows unit 0's texture instead of the shaded colour |
 | `tools/dbg_runs.sh` | runs several debug sessions in parallel up to the profile screen |
-| `tools/race_test.sh <name> [VAR=value ...]` | Quick Race test in `dbg/<name>`; quits `QUIT_AFTER` (default 10) s after the race scene appears |
+| `tools/race_test.sh <name> [VAR=value ...]` | Quick Race test in `dbg/<name>`, booted with `F1CE_SKIP_INTRO=1` (English); quits `QUIT_AFTER` (default 10) s after the race scene appears |
 | `F1CE_QUIT_AFTER_3D=<s>` | exits that many seconds after the first frame with 800+ draws (saves the last frame) |
-| `F1CE_QR_TRACK`, `F1CE_QR_DRIVER`, `F1CE_QR_DISTANCE`, `F1CE_QR_WEATHER`, `F1CE_QR_AI`, `F1CE_QR_FUEL`, `F1CE_QR_DAMAGE`, `F1CE_QR_FAILURES`, `F1CE_QR_PENALTIES` | Quick Race settings regardless of the menu (`runtime/hle_quickrace.cpp`; the launcher's Advanced tab, "Quick Race Settings"): track folder name (`hungary`) or calendar index 0-17, driver id/surname/code (`heidfeld`, `HEI`; the team follows), distance 10/20/30/50/75/100, weather variable/sunny/cloudy/lightrain/heavyrain, AI easy/medium/hard, fuel and tyre wear off/scaled/realistic, damage/failures/penalties 0/1. Applied until the race's 3D scene, so `tools/race_test.sh` (cross only) reaches any combination; the menu keeps showing its own choices |
+| `F1CE_QR_TRACK`, `F1CE_QR_DRIVER`, `F1CE_QR_DISTANCE`, `F1CE_QR_WEATHER`, `F1CE_QR_AI`, `F1CE_QR_FUEL`, `F1CE_QR_DAMAGE`, `F1CE_QR_FAILURES`, `F1CE_QR_PENALTIES` | Quick Race settings regardless of the menu (`runtime/hle_quickrace.cpp`; the launcher's "Quick Race Settings" tab): track folder name (`hungary`) or calendar index 0-17, driver id/surname/code (`heidfeld`, `HEI`; the team follows), distance 10/20/30/50/75/100, weather variable/sunny/cloudy/lightrain/heavyrain, AI easy/medium/hard, fuel and tyre wear off/scaled/realistic, damage/failures/penalties 0/1. Applied until the race's 3D scene, so `tools/race_test.sh` (cross only) reaches any combination; the menu keeps showing its own choices, and a setting changed in the menu (a value change within 2 s of a d-pad/stick move) is left to the menu from then on |
+| `F1CE_SKIP_INTRO=1`, `F1CE_LANGUAGE=<name>` | starts at the "Press Start" screen: no language menu, no Studio Liverpool / SCE logos, no intro movie (`runtime/hle_boot.cpp`; launcher: General tab). The language is `english` (default), `french`, `german`, `italian`, `spanish`, `portuguese` or `finnish`; without the skip it is only the one the language menu starts on |
 | `F1CE_QR_POKE=<offset>:<hex>` | experiment: writes a word into the Quick Race settings object until the race (+0x08 and +0x18 showed no effect in single runs, +0x10 = 4 crashes; an early "+0x08 changes the grid size" came from parallel runs taking another menu path) |
+| `F1CE_TICK_DUMP=<s>,<ea hex>,<size hex>[,<ea>,<size>...]` | with `F1CE_60FPS`: <s> seconds into the first 3D scene, saves that guest memory on 32 (`F1CE_TICK_DUMP_FRAMES`) consecutive frames (`tick_<k>.bin`, further ranges `tick_<k>_<ea>.bin`), to find values that swing from tick to tick; keep it small (large dumps slow frames to 2 ticks) |
+| `F1CE_PHYS_PROBE=<s>[,<ea>]`, `F1CE_PHYS_LOG=<s>,<ea>[,all]` | car physics probes (`runtime/hle_physics.cpp`, `PROBES` in `tools/recomp.py`): the wheel-spin update and slip solve of the car whose +0x910 is <ea>, or calls of the tyre function 0x11c150 |
 | `F1CE_MEM_DUMP=<s>,<s>,..` | saves the data segment and user memory (`mem_<s>.bin`, 16 MB at 10000000 then 192 MB at 30000000) at those input times, to find game variables by comparing snapshots |
 | `F1CE_PROFILE=1` | every few seconds: what each guest thread spends its time on (functions, HLE calls) |
 | `F1CE_HOST_PROFILE=<s>` | after s seconds, samples the SPU worker threads for 10 s: hottest host functions and addresses, and the callers of time spent in DLLs; `F1CE_HOST_PROFILE_RSX=1` samples the renderer thread instead |
@@ -98,7 +102,16 @@ Keyboard: arrows = d-pad, **Z** = ✕, **X** = ◯, **A** = □, **S** = △, **
 | `F1CE_SPU_VERIFY=1` | compares every SPU block with the LS before it runs and logs mismatches (no dispatch cache, slower) |
 | `F1CE_SPU_NOIDIOM=1` | runs the table-building SPU loops as translated (`IDIOMS` in `tools/spu_aot.py`; for comparison) |
 | `F1CE_SPU_NOCULL=1` | the geometry jobs keep all triangles: SPU workers ~80% -> ~56% busy, but the renderer gets ~1000 more draws and 8x the indices, so fps drop (see the progress log) |
+| `F1CE_FPS_CAP=<n>` | with `F1CE_60FPS`: frames of at least 1/n s (launcher: "Frame rate cap"). 30 = two ticks per frame as the original, with this mode's pacing; holds 30 on machines where the original 30 fps mode dips (Steam Deck class) |
+| `F1CE_SHAKE_FILTER=0` | with `F1CE_60FPS`: turns off the shake filter (then the old 30 fps hold for a standing car applies) |
+| `F1CE_SPIN_WAIT=1`, `F1CE_TASK_THREADS=1`, `F1CE_PRIO=0` | the waits, SPURS task threads and thread priorities as before 2026-11-06 (spinning waits, a new thread per task, all at normal priority): A/B comparisons |
+| `F1CE_CPUS=<n>` | runs on the first n logical processors only (Windows), to estimate smaller machines: 8 = 4 cores / 8 threads like a Steam Deck (whose cores are slower) |
+| `F1CE_THREAD_CPU=1` | with the `cpu:` line every 5 s: the cores each thread used (threads are named) |
+| `F1CE_TICKS_FIXED=1` | with `F1CE_60FPS`: exactly one tick per frame whatever the time (with frame dumps, to see per-tick motion) |
+| `F1CE_USLEEP_LOG=1` | `sys_timer_usleep` requests per second by size, and the callers of short ones |
 | `F1CE_PIN=0/1` | thread placement with 12+ logical processors (Windows). Default: the renderer has a core of its own. 0: all threads left to the system; 1: the main PPU thread gets a core too |
+| `F1CE_PM_NATIVE=0` | runs the job manager policy module's functions as SPU code instead of their native versions (`runtime/spu_pm.cpp`) |
+| `F1CE_PM_CHECK=1/2` | every 64th call (2: every call) of each native job manager function also runs on two copies of the SPU, interpreter against native (DMA puts only logged), and logs differences in local store, registers, MFC state and DMA commands (`pm check` lines) |
 | `F1CE_SPU_NOFASTCULL=1` | runs the geometry job's vertex transform and triangle cull as translated, not the native versions (`spu_fast_*` in `runtime/spu_ops.h`) |
 | `F1CE_SPU_CULL_CHECK=1/2` | every 64th transform and cull also runs on two copies of the SPU, interpreter against native, and logs differences; 2 puts NaN, infinities and huge values into the copies' input |
 | `SPU_AOT_HEAT=1 python -I tools/spu_aot.py` | builds counters per SPU block; the game writes `spu_heat.txt` every 10 s (regenerate without it afterwards) |
@@ -110,6 +123,7 @@ Keyboard: arrows = d-pad, **Z** = ✕, **X** = ◯, **A** = □, **S** = △, **
 | `F1CE_TRACE_COUNT=<k>` | extends `F1CE_TRACE_FRAME` to k consecutive frames |
 | `F1CE_WPOS_CLIP_W_FP=<fp hash>,..` | WPOS.w = clip w for those programs only (`-<hash>,..`: all but those) |
 | `F1CE_FULLSCREEN=1`, F11 / Alt+Enter | start in full screen / toggle it at any time |
+| `F1CE_RUMBLE=<0..200>` | gamepad vibration strength in percent (default 100, 0 off; launcher: "Controller vibration"). Disc version 01.00 has no pad vibration; this is the DualShock 3 vibration of update 02.00 (0x3591e8 there) ported to 01.00's controller update 0x3574c0: impacts, kerbs, slipping wheels, run-off, low grip and engine stall/start, see `runtime/hle_rumble.cpp`. `F1CE_RUMBLE_LOG=1` logs its inputs 10 times a second |
 | `F1CE_WINDOW=<w>x<h>`, `F1CE_STRETCH=1` | initial window size / fill the window instead of keeping the internal image's aspect ratio (black bars) |
 | `F1CE_COMPILE_THREADS=<n>`, `F1CE_NATIVE_GLSL=1` | shader compile threads (default 1) / the scale-1 shader sources of before |
 | `F1CE_NO_PRECOMPILE=1` | skips the start-up shader phase (the program database is still recorded) |
@@ -161,8 +175,8 @@ Keyboard: arrows = d-pad, **Z** = ✕, **X** = ◯, **A** = □, **S** = △, **
 - [ ] SDL/OpenGL or Vulkan backend for the Linux build (also needed for a Steam Deck test)
 - [x] Screen rain drops (smoothed by `F1CE_RAIN_SMOOTH`) and the suspension arms: the user judged both faithful to the
       original on 2026-11-04 (RPCS3 is brighter overall)
-- [ ] Car shake at the grid with `F1CE_60FPS` reported again on 2026-11-03 (the hold engaged in that log; track and
-      moment still to be found)
+- [x] Car shake at the grid with `F1CE_60FPS` (the game's own wheel-spin swing, also on the original): drawn filtered,
+      physics unchanged (2026-11-06, `runtime/hle_physics.cpp`)
 
 ## Roadmap
 
@@ -192,10 +206,11 @@ Steps 1-7 are done; 8 is in progress, 9-11 are next.
 7. **Shader progress text.** *Done 2026-10-31: "Loading shaders... 42%" above the bar, on both renderers.*
 8. **Performance for 60 fps.** Make the game as fast as possible with `F1CE_60FPS=1`, aiming at a steady 60.
    *In progress. Full Silverstone grid, Vulkan at 1080p: 33 (2026-10-31) -> 37-38 (11-01) -> ~46 (11-03) -> ~48 (cube
-   map at 30 Hz, 11-04) -> ~54 (translated SPU clusters keep registers in host registers, 11-04). Driving holds 60 on
-   open track. The grid is limited by the SPU work (~7.3 of the 6-core CPU's threads busy); the remaining large
-   pieces are the job manager's policy module (~30% of SPU worker time) and the shadow passes
-   (`RenderStaticShadows` and `RenderBlurredShadows` ~10% of a grid frame each, measured with `F1CE_SKIP_FN`).*
+   map at 30 Hz, 11-04) -> ~54 (translated SPU clusters keep registers in host registers, 11-04) -> ~57 (native job
+   manager functions, 11-05) -> ~58 (its interrupt entry too). Driving holds 60 on open track. On this PC the grid now
+   waits for particular jobs (the main thread's job waits), not for SPU time in total: skipping the shadow passes frees
+   ~20% of SPU time and gains nothing. Less SPU work still matters on weaker CPUs (step 9). Shadow passes keep running
+   every frame (any other rate breaks them visually).*
 9. **Linux backend and Steam Deck.** SDL window/input/audio and the Vulkan renderer in the Linux build (today it is
    headless), then a test on a Deck. An 8-thread estimate on this PC (2026-10-31) gave 26-30 fps on the grid, so the
    Deck needs less SPU work, not only a faster runtime.
@@ -851,3 +866,194 @@ banks, then waits for SPU work.
     on Vulkan and 2 on OpenGL: the gantry shadow is in place, softer or sharper.
   - Launcher, General tab: "Reflection updates" (replaces "Reflection faces per frame", which saved renderer time only) and "Shadow
     map resolution".
+- **Native job manager (2026-11-05, Vulkan, scale 1.5, `F1CE_60FPS=1 F1CE_60FPS_NOHOLD=1`, Silverstone grid):**
+  - The job manager's policy module (guest 0x100be000, LS 0xA00..0x3580, shared by every SPURS workload) was ~30% of the
+    SPU workers' time at ~2.5 ns per SPU instruction: its clusters contain channel instructions, so their registers stay
+    in memory. Its hottest functions are now C++ (`runtime/spu_pm.cpp`), each entered at the head of its first block
+    (`SKIPS` in `tools/spu_aot.py`) and leaving the local store, MFC state and the registers its callers read exactly as
+    the SPU code does (quadword side values included):
+    - 0x19f8, a job's buffer list (~65% of the PM's instructions with its helpers 0x2c00 / 0x2750 / 0x27b8 / 0x2848):
+      buffer sets of 1 KB LS blocks in three job slots, 256-bit block maps, element choice by age and reuse of data the
+      other slot already holds, write-back of conflicting outputs, the GETs (lists too) of the job's inputs;
+    - 0x2d48 (DMA info of a buffer, tag allocation), 0x2ce8 + 0x2c80 (a job releases a buffer), 0x1670 up to 0x18e0 with
+      0x2940 (job end: sets handed over, outputs flushed), 0x2288 (taking the next job from the queue; its GETLLAR /
+      PUTLLC still go through the MFC, so the reservation rules are unchanged).
+  - Interrupts: the PM's only event is the list stall-and-notify it raises itself (0x26e4, event mask 2). Functions run
+    natively only where the original could take no interrupt inside them: 0x19f8 with interrupts off, 0x2ce8 (it opens
+    a window at 0x2d14) with no event pending; 0x2940's notify is its last command, so the interrupt is taken at 0x18e0
+    as before. Other cases go to the SPU code (none seen).
+  - `F1CE_PM_CHECK` compares each function with the interpreter on copies of the SPU (dry DMA: puts logged, conditional
+    stores into a private line copy). In a race: 0x19f8 87k compared (up to 8200 instructions, 36k with DMA), 0x2d48
+    116k, 0x2ce8 47k, 0x1670 33k (27 with write-backs), 0x2288 36k: no differences, except 8 in 0x2288 in data fetched
+    by plain GETs from lines other SPUs change between the two runs (wait counters).
+  - Grid over three alternating pairs, same exe with `F1CE_PM_NATIVE=0`: 0x19f8 alone 54.5 -> 56.7, the first four
+    54.4 -> 57.3 (every pair better); the job queue adds nothing measurable (failed PUTLLCs 192k -> 181k per second).
+    A 70 s drive had no errors or warnings.
+  - What is left of the PM: its DMA copies inside 0x19f8 (16 KB job data, lists), the queue atomics (~4% of worker
+    samples), the interrupt entry 0xa30 (~2%, registers saved by code it writes on its stack) and ~20 small functions.
+  - Later the same day, the interrupt entry (0xa2c, up to the event handler 0x21c0) and exit (0xa98, to the iret): the
+    handler saves r0..r79 with 76 stores it writes onto the stack and calls, restores them the same way, and returns
+    with `iret` or to a continuation in r78. Natively the same code words are written (the local store stays the same)
+    and the registers saved and loaded directly. 32k checks each, every register compared: no differences.
+  - Bug found on the way: native functions entered from cluster code with local registers got registers the cluster
+    does not use from its local copy, where they are not valid (the interrupt entry saved a link register of 0xcc and
+    an SPU jumped to the kernel area). `tools/spu_aot.py` now writes the cluster's registers back to the thread before
+    the call there, and the native functions always work on the thread. The kernel-call fatal error prints srr0, the
+    interrupt state and, with `F1CE_TRACE_WKL`, the last blocks run.
+  - Grid, three alternating pairs: original 55.0 / 55.5 / 54.5 fps, native 57.9 in all three. A 70 s drive held ~60 with
+    no errors.
+  - Shadow passes priced again with `F1CE_SKIP_FN` (measurement only): 57.9 fps with them, 58.4 without the static one
+    (0x2f141c), 57.5 without the blurred one (0x2f1bec), 58.6 without any shadow map (0x43f620), while SPU busy drops
+    86% -> 67%. `F1CE_PROFILE` main-wait: the main thread waits on job counters (00551228) ~31% of its time and on the
+    event flag ~9%, with all five workers busy on other jobs; the grid is limited by the job chain's latency here.
+  - Without vsync (`F1CE_VSYNC=0`) the grid reaches only ~61 fps (62 with no shadow maps), with main sleeping 14-25%
+    of its time and the renderer idle 0.6-2 ms per frame: the frame is close to the 60 fps pacing, and the 6-core CPU
+    carries ~6.6-7.3 cores of load, so the remaining work competes for the same cores.
+  - Tried and removed: the job runtime's command-stream loop (0x5a28 / 0x5c88 in the geometry jobs, the hottest job
+    code in the SPU profile at ~5%: per command it copies 32 bytes of the stream into the frame six times and calls a
+    handler from a table with r3 = context, r4/r5 = the two halves as vector arguments) as native code. Exact (207k
+    checks; a first version broke the game because it did not set r4/r5: native replacements before an indirect call
+    must set the callee's argument registers too), but six alternating pairs gave no fps change, so it was taken out.
+- **Grid shake, root cause search (2026-11-05):**
+  - The physics is tick-based: each tick runs 3 substeps of 1/180 s (0x116d38 for all cars, 0x11c150 tyre forces per car). The player
+    car's state is in the heap around 0x38272000; on a shaking grid its tyre forces (0x382725d0..dc, ±4097 / ±3967 / ±3894 / ±3830 N),
+    a second force set (0x38272640..4c, ±600) and the wheel values copied for rendering to 0x101106f0 (from 0x38272a40, written by the
+    constraint builder 0x11ac0c) change sign on every tick: a period-2 limit cycle of the contact/tyre solver on a standing car.
+  - It is bistable: the same setup sometimes settles (forces ~0.02 or 0) and sometimes stays in the cycle, depending on how the car
+    arrives on the grid, so with/without experiments need several runs each. Single runs suggested a dependence on frame time (33 ms
+    frames settled, 16 ms ones did not; the game's clock at 2x settled; the smoothed frame time is the float at 0x100ca4dc, read
+    through the accessor 0x72bc0 by ~45 functions, none in the physics), but repeated runs showed unchanged builds settling too.
+    Making non-blocking SPURS task-result reads wait did not remove it.
+  - Open: a fix in the solver (damping the cycle of a standing car) or a hold that engages only while the cycle is present.
+- **Grid shake, root cause found (2026-11-06):** it is the game's own wheel-spin integration, and the original has it too.
+  - Car objects: 22 of 0x1390 bytes (0x367aefc0 + n * 0x1390 on the quick-boot path; the player is the last, car 21), passed as r3
+    to the per-substep chain 0x117ed0 (wheels), 0x11b0dc (slip solve, calls 0x11ac0c), 0x11d66c, 0x11cf6c, 0x11c150. The render
+    block 0x10110650 + id * 0x110 is copied from them by 0x16ebac (+0xa0 = car +0x910, +0xb0 = +0xa70, +0xc0 = +0xff0).
+  - car +0x910 = the four wheels' angular velocity ω (rad/s), +0x6b0 = wheel radius 0.33 m, +0x38c = wheel inertia 3.0 (+0x390 =
+    1/3), +0x510 = longitudinal tyre force (N). Each substep (dt = 1/180 s) 0x117ed0 does ω += dt * (-F * r) / I (pc 0x1187f0), and
+    0x11ac0c computes the slip ratio as slip / max(|contact speed|, 16) (vrefp at 0x11b058), so below 16 the stiffness is constant.
+  - With those constants the wheel's own feedback is ω - ω0 -> -(ω - ω0) * ~2.00 per substep (fit over consecutive substeps:
+    K = 1080, gain dt * K / I = 2.0002): the stability limit of explicit Euler. ω swings ±0.19 rad/s on every substep and never
+    settles; the amplitude is whatever the car arrives with, which is the "bistable" behaviour. The tyre force swings ±617 N with it,
+    the suspension and body follow.
+  - `F1CE_PHYS_PROBE=5` in normal 30 fps mode shows the same per-substep swing with the same amplitude: the original game has it.
+    It is invisible there because a 30 fps frame is 2 ticks * 3 substeps (even: every frame sees the same phase); with
+    `F1CE_60FPS` a frame is 3 substeps and the phases alternate on screen.
+  - Not an emulation error: rounding `vrefp` results to 12 bits (the Cell gives an estimate, here exact) down or up left all nine
+    runs shaking.
+  - Debug tools: `PROBES` in `tools/recomp.py` (runtime code called before one instruction), `runtime/hle_physics.cpp`
+    (`F1CE_PHYS_PROBE=<s>[,<ea of car +0x910>]` logs the ω update and the slip solve, `F1CE_PHYS_LOG` tyre-function calls),
+    `F1CE_TICK_DUMP` takes several ranges and `F1CE_TICK_DUMP_FRAMES`. Small dumps only: a 96 MB dump slowed frames to 2 ticks
+    and hid the swing.
+  - Fix options (the 30 fps hold stays the default until one is chosen): change the game's low-speed tyre model (e.g. halve the
+    wheel feedback below the clamp speed, or 4 substeps of 1/240 s per tick: gain 1.5, the swing dies within a tick, ~33% more
+    physics time), or leave the physics as the original and draw the cars at the mean of the last two substeps (cancels the
+    swing exactly, 2.8 ms of delay, needs the car transform fields).
+- **CPU profile of the grid (2026-11-06, Vulkan, scale 1.5, `F1CE_60FPS=1 F1CE_60FPS_NOHOLD=1`, Silverstone, ~57 fps, ~7.1 cores):**
+  - Main: job counters 00551228 28-32%, `cellSpursEventFlagWait` 10-13%, sleeping 11-19%; every main-wait sample has all five
+    workers busy, so total SPU work is still the limit. (`gcm_interrupt` shows "100% fn 00489a2c": the profiler credits a thread
+    waiting on a host condition variable to its last guest function; it is not spinning.)
+  - SPU workers (`F1CE_SPU_PROFILE`): idle 13%, job manager ~24% (natively replaced parts included), job code ~62%. The PM's
+    remaining hot pcs are MFC commands: 0x1eec / 0x1f24 issue the job-data GETs (list and 16 KB chunks), 0x22ac / 0x2388 are the
+    job-queue GETLLAR / PUTLLC (~40k pairs per second per worker, ~22% of the PUTLLCs fail). Mean GET sizes are small (16-620 B).
+  - New log line `SPU slow dispatch time`: 0.19 cores for all workers (~4% of their time), block rebuilds 0.045 (222k/s).
+  - Renderer (`F1CE_HOST_PROFILE_RSX`): draw 21.8%, driver ~13%, front end loop 9.7% (~125k commands per frame), hash_range 8.9%,
+    hash_fp 2.9%, sleeping/semaphore waits ~16%; idle ~1.5 ms per frame.
+  - No single remaining item is above ~4% of a thread; with ~0.26% fps per 1% of SPU work saved, the cheap leads are used up.
+- **Grid shake fixed by filtering what is drawn (2026-11-06, option (b) chosen by the user):**
+  - Only the player car runs the full substep physics: 0x17b200 is its tick (3 calls of 0x116d38, one per substep; the other
+    cars take a simpler path), 0x117ed0 is the first function of each substep of every car.
+  - `runtime/hle_physics.cpp`: at the start of each substep (hook on 0x117ed0) the car object (0x1390 bytes) is copied; after
+    the tick (hook on 0x17b200, which runs the original and then returns) each 16-byte quad whose words are zero or normal
+    floats in the three states gets x = s3 - (s3 - 2 s2 + s1) / 4 (s1, s2: start of the last two substeps, s3: end). That
+    removes a period-2 component exactly and leaves steady motion without delay (error a * dt^2 / 4). Before the next tick
+    the physics values are put back (each word that still holds the filtered value), so the simulation is the original's;
+    a tick that runs no substeps (some do) gets the previous filter again.
+  - Fields with the swing (12 substep snapshots): orientation rows (+0xb0..+0xd8), wheel matrices (+0x1c0..+0x218),
+    velocities (+0x220..), positions (+0x3d0, +0x3f8), wheel world positions (+0x840), wheel angles (+0x900), ω (+0x910),
+    suspension (+0xa70), forces and slip (+0x4a0.., +0x4e0..+0x51c). The body object (+0x140) has none.
+  - Check: one tick per frame (`F1CE_TICKS_FIXED`) and 12 frame dumps: without the filter the whole image moves ±1 px on
+    alternate frames (mean frame difference 2.95); with it 0.2 and no shift. The probe still shows the physics swing.
+    A 40 s drive was clean. On by default with `F1CE_60FPS`, and the 30 fps hold is off then.
+  - Note: the tick dump (`F1CE_TICK_DUMP`) is taken on the RSX thread at flip time, so it can see the car during the next
+    tick (restored values): use frame dumps to judge what is drawn.
+- **CPU time for smaller machines / Steam Deck (2026-11-06):** goal a steady 30 fps on a Deck (4 Zen 2 cores / 8 threads,
+  ~0.6x the per-thread speed of this Ryzen 5 5600G).
+  - Waiting threads used CPU: in the original 30 fps mode the process took 5.9 cores with the SPU workers 49% busy (main 0.99
+    core, renderer 1.00, each worker 0.72). New blocking waits (`LineWait`, core.cpp / ppu_runtime.h): a thread registers the
+    128-byte guest line it polls and sleeps on a futex (WaitOnAddress / futex) until a writer of that line wakes it, 1 ms at
+    most. Writers that wake: SPU DMA puts and list puts, PUTLLC / PUTLLUC and PPU atomics (`line_written`), HLE updates, the
+    RSX's reference / semaphore releases and GET; plain PPU stores do not, except two probes after the game's own stores
+    (`PROBES` in tools/recomp.py): the flip handler's label (0x489aa8) and libgcm's PUT (0x48b050).
+  - Users: the job manager's job-counter waits (`PPU_SPIN`, 0x551228 / 0x5513bc: 20 us spin, then the counters' lines),
+    libgcm's wait for the RSX reference (13000-19000 `usleep(30)` per second from 0x4ef074) and the PPU throttle
+    (`rsx_ref_wait`), SPURS event flag and queue waits, idle SPU workers (the ready counts' line), the RSX's semaphore
+    acquire (the flip handler's label) and its idle FIFO (PUT).
+  - SPURS tasks (~500 per second, ~250 us each): a pool of task threads instead of a new thread per task (one is created
+    only when none is idle, so tasks waiting for each other never block). Main and the task threads run above normal
+    priority (critical path).
+  - 30 fps mode, full CPU: 5.9 -> 4.0 cores (main 0.32, renderer 0.44, workers ~0.52 each). 60 fps mode, grid, three pairs
+    against the old behaviour in the same exe: 57.6 -> 59.2 fps and 7.3 -> 6.1 cores; a 60 s drive at 59.4 fps on 4.7 cores.
+  - Smaller machines (`F1CE_CPUS`, 60 fps mode uncapped, scale 1): 6 logical CPUs (3 cores) 32.0 -> ~38 fps (task pool
+    32 -> 37.5 in three pairs, priorities +3% in four pairs), 8 logical CPUs 49 fps before the pool. 4 workers instead of 5
+    are worse (~32 vs ~38); 4 logical CPUs are too few (12-14 fps).
+  - The original 30 fps mode on 6 CPUs gave only 28.8 with dips to 26.8 (it holds the next frame back to a vblank); 60 fps
+    mode with `F1CE_FPS_CAP=30` holds 30.0 on 6 and on 8 CPUs, 60 ticks/s; a 60 s drive on 6 CPUs held 29.9-30.0.
+    `F1CE_CUBE_HZ=15` saves ~10% more (6 CPUs uncapped 33.5 -> 36.7).
+  - Steam Deck estimate (never run there): ~32-36 fps uncapped on the Silverstone grid, so 30 with a small margin. Settings:
+    Vulkan, 1280x800, "Up to 60 fps" + "Frame rate cap 30", reflections 15 per second. Under Proton the waits map to Linux
+    futexes; the native Linux build still has no renderer.
+- **Quick boot to the Press Start screen (2026-11-05):**
+  - `F1CE_SKIP_INTRO=1` (launcher: "Skip the language menu and the intro") and `F1CE_LANGUAGE=<name>` (launcher: "Language"),
+    `runtime/hle_boot.cpp`. Press Start now shows ~7 s after launch, against the language menu, then the logos (~5 s), then a load (~4 s) and the
+    whole intro movie before.
+  - The front end is Lua in `offline.wad`: Lua 5.0 instructions (op bits 0-5, C 6-14, B 15-23, A 24-31, constants from
+    RK 250) in a 5.1-style container (`\x1bLuaQ`, format 1, little endian, float numbers; function: source, line, 4 bytes,
+    lineinfo, locvars, upvalues, constants, protos, code); `tools/luadis.py <wad> <offset>` disassembles a chunk. The boot decisions go through properties of the game object, so the
+    skip only sets the state the game itself reaches on other paths:
+    - `Init/Language.lua` (the boot Init graph, after `NoPads`) skips its menu when `game.initBoot().firstBoot == 0`, applying
+      `bootLanguage` with `game.language` (and mph/km/h). That flag (byte 0x10040010) is cleared by the boot code only when the game is
+      started with a `{language}` argument, the return from `ONLINE.BIN`; `GameOrProfileMainSelector.lua` then skips Press Start for
+      the profile autoload, so only the first `initBoot` call (Language.lua's) sees 0. The logos come with the menu path and go too.
+    - `bootLanguage` (0x100C7620) is the system language mapped by 0x48F88; game codes (switch at 0x247878): 0 english,
+      1 german, 2 french, 3 italian, 4 spanish, 5 finnish, 6 japanese, 7 american, 10 portuguese.
+    - `GameOrProfileMainSelector.lua` plays the intro unless `game.attract()` (byte game + 0x70F4) is true, which `Attract.lua`
+      sets after the intro: set at its first read, the selector goes to `DoStartScreen` (`Splash.lua`).
+- **Freeze loading a Time Trial (2026-11-07, user log, Monaco):**
+  - Main thread in `sys_lwmutex_lock` (audio mutex) owned by Audio_Thread, which held it in fn 0x4D31CC: a usleep(500)
+    loop over its three job lists (fn 0x551358: min of queue head and per-SPU halfwords >= the list's count at +0x26).
+    Every thread idle, no SPURS report after the load (a report needs a run to end). Read from the live process: list
+    w6 counted 12 jobs, its queue line had top = head = 11 and entry 11 empty. The append (fn 0x55165C) stores the entry,
+    then the top halfword, with plain stores; both were gone: the job manager's PUTLLC of the same 128-byte line (its head
+    update) compared the line and then copied its old image back over the stores that landed in between. On the Cell any
+    store loses the reservation.
+  - Fix (`spu.cpp` putllc_store): each changed doubleword is swapped in with a compare-and-swap against the reservation
+    copy; a store found in one fails the PUTLLC (doublewords already swapped are put back). PUTLLC failure rate unchanged
+    (~24%). Not reproduced on demand; likely the same class as the older rare race-start freezes. The missing loading-screen
+    background was probably only the frame shown when main stopped (not checked).
+  - Watchdog now prints the SPU workers (workload, pc), every workload's ready count / running / idle time and the job
+    manager queue heads, and for fn 0x4D31CC the three audio job lists (target, top, head and SPU slots).
+- **Pit stop SPU code translated (2026-11-07):** a pit stop ran ~30 s of untranslated SPU code (40-60 M interpreted
+  instructions/s, 50-52 fps instead of ~60). User recording `dbg/spu_blocks_pit1.txt` (223 blocks) added with
+  `tools/spu_aot.py` (3696 blocks, 602 clusters).
+- **Second Time Trial freeze, open (2026-11-07, Monaco, flying lap after a Silverstone race):** main in fn 0x5513B8 waiting
+  for job list w2 (queue 0x10C29100) to reach 2330; jobs 2326-2328 (binary 0x100A1280, the in-order job type of w1/w2)
+  spin on three SPUs. Each such job waits until the first incomplete job, from the per-SPU done windows at 0x10414F00
+  (base + 96-bit mask per SPU), is within 95 of its own index (the PM's job index, r80). Entries 747-2325 are skips
+  (kind 3, reserved by fn 0x48A948 -> 0x5515D0 with the count at object +0x20 in fn 0x43A11C), so the window never
+  gets there. The original PM code (0x2288) skips kind 3 like the native one. In normal races (Silverstone, Monaco Quick
+  Race, scripted Monaco Time Trial) skip runs (~100k/s, up to ~3400) come only at the end of a list, the next job being
+  job 0 of the reset list; a job after >= 96 skips mid-list was seen only in this freeze. Not reproduced; cause (a wrong
+  reserve count, a missed list reset, or emulation timing) unknown. Dumps (guest 0x10000000/0x30000000, LS and registers
+  of the three SPUs) in the session scratchpad freeze2/. `job queue skips` line in the SPURS report; `F1CE_PM_SKIP_LOG=1`
+  logs the job after >= 96 skips (over several grabs). Time Trial by script: IN="9:start,13:cross,17:cross,21:down,
+  23:cross,27:cross,37:cross" (garage, leave), any track with `F1CE_QR_TRACK`.
+- **Second Time Trial freeze: cause found (2026-11-07):** the cube map skip of `F1CE_60FPS` (hle_cubemap.cpp, every other
+  frame at 30 updates/s). Both frozen lists were cube-skipped frames (no six face groups): main view, a reserve of ~1580
+  skips, then ordered jobs (operation bytes `01 00 02 00 ... 03`) whose 95-job window cannot cross the reserve. With
+  `F1CE_CUBE_HZ=0` the user drove 3 laps of Monaco Time Trial without a freeze (it froze ~20 s into the lap twice before).
+  Left as it is for now by the user's choice (no per-mode rule such as "never skip in Time Trial": the same can happen in
+  untested places); the launcher's 60 fps option now carries a warning. A real fix has to keep the job list as the game
+  builds it when the pass is skipped, or not skip it.
+  - Other 60 fps problems reported by the user (not investigated): shadows flashing at random, pit stop animations wrong,
+    odd audio (sounds as if the audio buffer were tied to the frame rate).

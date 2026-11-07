@@ -89,8 +89,11 @@ LoadedProcess load_elf(const std::string& path) {
     return p;
 }
 
+void limit_cpus();   // core.cpp
+
 int main(int argc, char** argv) {
     namespace fs = std::filesystem;
+    limit_cpus();
     // Usage: f1ce [path/to/PS3_GAME] [--trace]
     std::string game = "PS3_GAME";
     for (int i = 1; i < argc; i++) {

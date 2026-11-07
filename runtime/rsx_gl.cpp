@@ -2807,8 +2807,7 @@ void flip(u32 ea, u32 pitch, u32 width, u32 height) {
             }
         }
         glBindFramebuffer(GL_READ_FRAMEBUFFER, s.fbo);   // (frame dumps below read the display buffer)
-        static const char* dump = getenv("F1CE_DUMP_FRAMES");
-        if (dump) {
+        if (host::dump_frame_due()) {
             std::vector<u32> px((size_t)pw * ph);
             srgb_write(false);
             glReadPixels(0, 0, (GLsizei)pw, (GLsizei)ph, GL_BGRA, GL_UNSIGNED_BYTE, px.data());

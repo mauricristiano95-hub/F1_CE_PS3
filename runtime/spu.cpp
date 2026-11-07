@@ -349,11 +349,18 @@ void SPUThread::run() {
                 continue;
             }
         }
+        const u64 t0 = __rdtsc();
         Block* b = find_block(pc);
         st_slow++;
-        if (!b || (b->checked != region_writes[b->home] && b->ver_sum != block_ver(*b))) { b = build_block(pc); st_build++; }
+        if (!b || (b->checked != region_writes[b->home] && b->ver_sum != block_ver(*b))) {
+            const u64 t1 = __rdtsc();
+            b = build_block(pc);
+            st_build++;
+            st_build_tsc += __rdtsc() - t1;
+        }
         const u64 epoch = region_writes[b->home];
         b->checked = epoch;
+        st_slow_tsc += __rdtsc() - t0;
         // debug: F1CE_SPU_VERIFY=1 runs every block through this path and compares it with the LS
         static const bool verify = getenv("F1CE_SPU_VERIFY") != nullptr;
         if (__builtin_expect(verify, 0))
@@ -395,6 +402,32 @@ void SPUThread::run() {
 u32 line_generation(u32 ea);       // core.cpp: write generation of a line (lost reservations)
 void line_written(u32 ea);
 
+// PUTLLC's write of a line that compared equal to the reservation copy. Plain PPU stores do not take the reservation
+// lock, so one can land between the comparison and the write; a memcpy then puts the old bytes back. That lost a job:
+// the game appended entry 11 to an audio job queue (std of the entry, sth of the queue top, fn 0x55165c) while the job
+// manager's PUTLLC of the same line (its head update) was under way, both stores were overwritten, and the audio
+// thread waited for a 12th job for ever (Time Trial load, 2026-11-07). Each changed doubleword is now swapped in only
+// if it still holds the reservation value; a store found in one fails the PUTLLC (the doublewords already swapped are
+// put back), as the lost reservation would on the Cell. A store to a doubleword the PUTLLC does not change orders
+// after it and is kept.
+static bool putllc_store(u8* line, const u8* old_data, const u8* new_data) {
+    u64* d = (u64*)line;
+    u64 o[16], v[16];
+    memcpy(o, old_data, 128);
+    memcpy(v, new_data, 128);
+    for (int i = 0; i < 16; i++) {
+        if (o[i] == v[i]) continue;
+        u64 expect = o[i];
+        if (__atomic_compare_exchange_n(&d[i], &expect, v[i], false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) continue;
+        for (int j = i - 1; j >= 0; j--) {
+            u64 mine = v[j];
+            if (o[j] != v[j]) __atomic_compare_exchange_n(&d[j], &mine, o[j], false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+        }
+        return false;
+    }
+    return true;
+}
+
 // profiling: get, put, getllar, putllc, failed putllc; one cache line per SPU id so workers do not contend
 struct alignas(64) DmaCounters { std::atomic<u64> c[5]; };
 DmaCounters g_dma_counters[16];
@@ -415,6 +448,31 @@ void SPUThread::dma(u32 cmd) {
         case 0xB4: bump(counts[3]); break;
     }
     if (on_dma) on_dma(*this, cmd, lsa, ea, size);
+    if (__builtin_expect(dma_log != nullptr, 0)) {   // checks: logged; puts leave memory alone, conditional ones succeed
+        dma_log->push_back({cmd & 0xFF, lsa, ea, size, mfc_tag});
+        const u32 c8 = cmd & 0xFF;
+        if ((c8 & 0xF4) == 0x20) return;
+        if ((c8 & 0xF0) == 0xB0) {   // the line goes to a private copy that later reads of it see
+            atomic_stat = c8 == 0xB4 ? 0 : 2;
+            has_reservation = false;
+            dry_line_ea = ea & ~127u;
+            memcpy(dry_line, ls + (lsa & 0x3FF80), 128);
+            return;
+        }
+        if (c8 == 0xD0) {   // without waiting for the line's lock (a check may hold it to keep the line still)
+            ea &= ~127u;
+            memcpy(res_data, ea == dry_line_ea ? dry_line : gmem(ea), 128);
+            write_ls(lsa & 0x3FF80, res_data, 128);
+            res_addr = ea; res_gen = line_generation(ea); has_reservation = true; atomic_stat = 4;
+            return;
+        }
+        if ((c8 & 0xF4) == 0x40 && dry_line_ea != ~0u && ea < dry_line_ea + 128 && ea + size > dry_line_ea) {
+            write_ls(lsa, gmem(ea), size);
+            for (u32 k = std::max(ea, dry_line_ea); k < std::min(ea + size, dry_line_ea + 128); k++)
+                ls[(lsa + k - ea) & 0x3FFFF] = dry_line[k - dry_line_ea];
+            return;
+        }
+    }
     extern u32 g_watch_line;   // core.cpp (F1CE_WATCH_LINE; may be retargeted at run time by F1CE_AUTO_WATCH)
     // debug ring of recent DMA commands (printed with F1CE_WATCH_LINE hits when F1CE_WATCH_HISTORY is set)
     struct DmaRec { u32 cmd, ea, lsa, size, pc; };
@@ -512,6 +570,7 @@ void SPUThread::dma(u32 cmd) {
     switch (cmd & 0xFF) {
         case 0x20: case 0x21: case 0x22: case 0x28: case 0x29: case 0x2A:   // PUT[B|F] (+ S variants)
             memcpy(gmem(ea), ls + lsa, size);
+            guest_written(ea, size);
             break;
         case 0x40: case 0x41: case 0x42: case 0x48: case 0x49: case 0x4A:   // GET[B|F]
             write_ls(lsa, gmem(ea), size);
@@ -553,7 +612,8 @@ void SPUThread::dma(u32 cmd) {
             }
             std::lock_guard lk(atomic_lock(ea));
             bool ok = has_reservation && res_addr == ea && (no_gen || res_gen == line_generation(ea)) && same_bytes(gmem(ea), res_data, 128);
-            if (ok) { memcpy(gmem(ea), ls + (lsa & 0x3FF80), 128); line_written(ea); }
+            if (ok) ok = putllc_store(gmem(ea), res_data, ls + (lsa & 0x3FF80));
+            if (ok) line_written(ea);
             if (!ok) g_dma_counters[id & 15].c[4].fetch_add(1, std::memory_order_relaxed);
             has_reservation = false;
             atomic_stat = ok ? 0 : 1;   // MFC_PUTLLC_SUCCESS / FAILURE
@@ -585,7 +645,7 @@ void SPUThread::run_list(u32 tag) {
             // the element's LS address keeps the EA's offset within the quadword (relevant for sizes < 16)
             u32 elsa = (L.lsa | (e1 & 15)) & 0x3FFFF;
             if (L.get) write_ls(elsa, gmem(e1), ts);
-            else memcpy(gmem(e1), ls + elsa, ts);
+            else if (!dma_log) { memcpy(gmem(e1), ls + elsa, ts); guest_written(e1, ts); }
             extern u32 g_watch_line;
             if (!L.get && g_watch_line < e1 + ts && e1 < g_watch_line + 128) {   // debug: F1CE_WATCH_LINE also covers list puts
                 static std::atomic<int> n{0};
@@ -650,6 +710,20 @@ void check_poison(SPUThread& t, u32 base, u32 quads, u32 seed) {
         memcpy(t.ls + base + ((seed >> 12) % quads) * 16 + ((seed >> 4) & 3) * 4, &v, 4);
     }
 }
+}  // namespace
+
+u64 spu_interpret_to(SPUThread& t, u32 to, u64 limit) {
+    u64 steps = 0;
+    for (; t.pc != to && !t.halted; steps++) {
+        if (steps > limit) return ~0ull;
+        u32 w = t.ls32(t.pc), idx = w >> 21;
+        g_table[idx](t, w);
+        if (!g_control[idx]) t.pc += 4;
+    }
+    return steps;
+}
+
+namespace {
 bool check_interpret(SPUThread& t, u32 from, u32 to) {
     t.pc = from;
     for (u32 steps = 0; t.pc != to; steps++) {

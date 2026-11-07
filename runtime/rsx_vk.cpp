@@ -2597,7 +2597,7 @@ void flip(u32 ea, u32 pitch, u32 width, u32 height) {
     }
     auto it = g_surfaces.find(offset);
     Surface* shown = it != g_surfaces.end() && it->second.tex ? &it->second : nullptr;
-    if (shown && getenv("F1CE_DUMP_FRAMES")) {
+    if (host::dump_frame_due() && shown) {   // (the image is read back only for frames that are dumped)
         const u32 pw = scaled(shown->width, shown->scale_x), ph = scaled(shown->height, shown->scale_y);
         std::vector<u32> px((size_t)pw * ph), fl(px.size());
         read_image(shown->tex, pw, ph, px.data());

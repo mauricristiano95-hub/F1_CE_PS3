@@ -908,3 +908,25 @@ template <class S> bool spu_skip_triangle_cull(S& s) {
     }
     return spu_fast_triangle_cull(s);
 }
+
+// ------------------------------------------------------------------ native job manager (runtime/spu_pm.cpp)
+// Each runs on the thread (cluster code with local registers writes them back first, tools/spu_aot.py) and returns
+// false to leave the call to the SPU code.
+bool spu_pm_buffers(SPUThread& t);     // 0x19f8
+bool spu_pm_dma_info(SPUThread& t);    // 0x2d48
+bool spu_pm_release(SPUThread& t);     // 0x2ce8
+bool spu_pm_job_done(SPUThread& t);    // 0x1670
+bool spu_pm_grab(SPUThread& t);        // 0x2288
+bool spu_pm_irq_enter(SPUThread& t);   // 0x0a2c
+bool spu_pm_irq_leave(SPUThread& t);   // 0x0a98
+template <class S> FORCE_INLINE bool spu_pm_call(S& s, bool (*f)(SPUThread&)) {
+    static_assert(std::is_same_v<S, SPUThread>);
+    return s.pm_native && f(s);
+}
+template <class S> bool spu_skip_pm_buffers(S& s) { return spu_pm_call(s, spu_pm_buffers); }
+template <class S> bool spu_skip_pm_dma_info(S& s) { return spu_pm_call(s, spu_pm_dma_info); }
+template <class S> bool spu_skip_pm_release(S& s) { return spu_pm_call(s, spu_pm_release); }
+template <class S> bool spu_skip_pm_job_done(S& s) { return spu_pm_call(s, spu_pm_job_done); }
+template <class S> bool spu_skip_pm_grab(S& s) { return spu_pm_call(s, spu_pm_grab); }
+template <class S> bool spu_skip_pm_irq_enter(S& s) { return spu_pm_call(s, spu_pm_irq_enter); }
+template <class S> bool spu_skip_pm_irq_leave(S& s) { return spu_pm_call(s, spu_pm_irq_leave); }

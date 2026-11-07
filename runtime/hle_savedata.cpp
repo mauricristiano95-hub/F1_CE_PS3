@@ -103,7 +103,7 @@ s32 run_dir(PPUContext& c, const SaveOp& op, const std::string& dir, bool is_new
     if (stdfs::is_directory(path, ec)) {
         for (auto& e : stdfs::directory_iterator(path, ec)) {
             std::string n = PATH_STR(e.path().filename());
-            if (!e.is_regular_file() || n == "_params.bin") continue;
+            if (!e.is_regular_file() || n == "_params.bin" || e.path().extension() == ".tmp") continue;
             nfiles++;
             u64 sz = e.file_size();
             size_kb += (u32)((sz + 1023) / 1024);
@@ -127,6 +127,13 @@ s32 run_dir(PPUContext& c, const SaveOp& op, const std::string& dir, bool is_new
     LOG_I("savedata: %s '%s' status callback -> %d", op.save ? "save" : "load", dir.c_str(), r);
     if (r < 0) return ERROR_CBRESULT;
     if (op.save) {
+        // CellSaveDataStatSet: setParam, reCreateMode (2 YES / 3 YES_RESET_OWNER: the directory starts empty), indicator
+        const u32 recreate = ld32(stat_set + 4) & 0xFFFF;
+        if ((recreate == 2 || recreate == 3) && stdfs::is_directory(path, ec)) {
+            for (auto& e : stdfs::directory_iterator(path, ec))
+                if (e.is_regular_file()) stdfs::remove(e.path(), ec);
+            LOG_I("savedata: '%s' recreated", dir.c_str());
+        }
         stdfs::create_directories(path, ec);
         if (u32 sp = ld32(stat_set)) {
             std::ofstream f(path / "_params.bin", std::ios::binary);
@@ -167,8 +174,17 @@ s32 run_dir(PPUContext& c, const SaveOp& op, const std::string& dir, bool is_new
                 else d.clear();
                 if (d.size() < (size_t)foff + fsize) d.resize((size_t)foff + fsize);
                 memcpy(d.data() + foff, gmem(fbuf), fsize);
-                std::ofstream f(fp, std::ios::binary | std::ios::trunc);
-                f.write((const char*)d.data(), (std::streamsize)d.size());
+                // written next to it and renamed over it: a crash mid-write must not leave a broken save (the game
+                // reports a corrupt profile and turns autosave off)
+                stdfs::path tmp = fp;
+                tmp += ".tmp";
+                {
+                    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+                    f.write((const char*)d.data(), (std::streamsize)d.size());
+                    if (!f) { LOG_E("savedata: cannot write '%s'", PATH_STR(tmp).c_str()); break; }
+                }
+                stdfs::rename(tmp, fp, ec);
+                if (ec) { LOG_E("savedata: cannot replace '%s': %s", PATH_STR(fp).c_str(), ec.message().c_str()); break; }
                 done = fsize;
                 break;
             }
@@ -234,19 +250,30 @@ s32 run_auto(PPUContext& c, bool save, const std::string& dir, u32 set_buf, u32 
 }
 }  // namespace
 
+namespace {
+s32 logged(const char* what, s32 r) {
+    if (r != CELL_OK) LOG_W("savedata: %s -> %08x", what, (u32)r);
+    else LOG_I("savedata: %s -> ok", what);
+    return r;
+}
+}  // namespace
+
 // cellSaveDataList{Save,Load}(version, setList, setBuf, funcList, funcStat, funcFile, container, userdata)
 HLE_FUNC(cellSaveDataListSave) {
-    RET(run_list(c, true, (u32)ARG(1), (u32)ARG(2), (u32)ARG(3), (u32)ARG(4), (u32)ARG(5), (u32)ARG(7)));
+    RET(logged("list save", run_list(c, true, (u32)ARG(1), (u32)ARG(2), (u32)ARG(3), (u32)ARG(4), (u32)ARG(5), (u32)ARG(7))));
 }
 HLE_FUNC(cellSaveDataListLoad) {
-    RET(run_list(c, false, (u32)ARG(1), (u32)ARG(2), (u32)ARG(3), (u32)ARG(4), (u32)ARG(5), (u32)ARG(7)));
+    RET(logged("list load", run_list(c, false, (u32)ARG(1), (u32)ARG(2), (u32)ARG(3), (u32)ARG(4), (u32)ARG(5), (u32)ARG(7))));
 }
 // cellSaveDataAuto{Save,Load}(version, dirName, errDialog, setBuf, funcStat, funcFile, container, userdata)
 HLE_FUNC(cellSaveDataAutoSave) {
-    RET(run_auto(c, true, gstr((u32)ARG(1), 32), (u32)ARG(3), (u32)ARG(4), (u32)ARG(5), (u32)ARG(7)));
+    RET(logged("auto save", run_auto(c, true, gstr((u32)ARG(1), 32), (u32)ARG(3), (u32)ARG(4), (u32)ARG(5), (u32)ARG(7))));
 }
 HLE_FUNC(cellSaveDataAutoLoad) {
-    RET(run_auto(c, false, gstr((u32)ARG(1), 32), (u32)ARG(3), (u32)ARG(4), (u32)ARG(5), (u32)ARG(7)));
+    RET(logged("auto load", run_auto(c, false, gstr((u32)ARG(1), 32), (u32)ARG(3), (u32)ARG(4), (u32)ARG(5), (u32)ARG(7))));
 }
 // cellSaveDataDelete(container): would show the system deletion UI; nothing to do without UI
-HLE_FUNC(cellSaveDataDelete) { RET(CELL_OK); }
+HLE_FUNC(cellSaveDataDelete) {
+    LOG_W("savedata: delete (system UI) requested, nothing deleted");
+    RET(CELL_OK);
+}

@@ -10,12 +10,18 @@
 #define NOMINMAX
 #include <windows.h>
 #include <timeapi.h>
+#include <synchapi.h>
 #include <tlhelp32.h>
+#include <algorithm>
+#include <map>
 #include <set>
+#include <string>
 #else
 #include <signal.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <linux/futex.h>
+#include <sys/syscall.h>
 #endif
 
 u8* g_base = nullptr;
@@ -134,11 +140,221 @@ void sleep_usec(u64 us) {
 #endif
     std::this_thread::sleep_for(std::chrono::microseconds(us));
 }
-void ppu_spin() {
-    static thread_local u32 n = 0;
-    for (int i = 0; i < 8; i++) _mm_pause();
-    if ((++n & 63) == 0) std::this_thread::yield();
+// ---- blocking waits on guest memory lines (ppu_runtime.h)
+namespace {
+struct alignas(64) LineSlot {
+    std::atomic<u32> line0{~0u}, line1{~0u};
+    std::atomic<u32> seq{0};
+    std::atomic<u32> sleeping{0};
+};
+LineSlot g_line_slots[16];
+std::atomic<u32> g_line_slots_used{0};
+void futex_wait(std::atomic<u32>* a, u32 expected, u32 timeout_ms) {
+#ifdef _WIN32
+    WaitOnAddress((volatile void*)a, &expected, sizeof(u32), timeout_ms);
+#else
+    struct timespec ts = {(time_t)(timeout_ms / 1000), (long)(timeout_ms % 1000) * 1000000L};
+    syscall(SYS_futex, (u32*)a, FUTEX_WAIT_PRIVATE, expected, &ts, nullptr, 0);
+#endif
 }
+void futex_wake_all(std::atomic<u32>* a) {
+#ifdef _WIN32
+    WakeByAddressAll((void*)a);
+#else
+    syscall(SYS_futex, (u32*)a, FUTEX_WAKE_PRIVATE, 0x7fffffff, nullptr, nullptr, 0);
+#endif
+}
+}  // namespace
+std::atomic<u32> g_line_waiters{0};
+
+void guest_written_slow(u32 ea, u32 size) {
+    const u32 first = ea & ~127u, last = (ea + std::max(size, 1u) - 1) & ~127u;
+    const u32 n = std::min<u32>(g_line_slots_used.load(std::memory_order_acquire), 16);
+    for (u32 i = 0; i < n; i++) {
+        LineSlot& s = g_line_slots[i];
+        const u32 l0 = s.line0.load(std::memory_order_relaxed), l1 = s.line1.load(std::memory_order_relaxed);
+        if ((l0 >= first && l0 <= last) || (l1 >= first && l1 <= last)) {
+            s.seq.fetch_add(1, std::memory_order_seq_cst);
+            if (s.sleeping.load(std::memory_order_seq_cst)) futex_wake_all(&s.seq);
+        }
+    }
+}
+
+thread_local int t_line_slot = -1;
+thread_local bool t_line_registered = false;
+LineSlot& my_line_slot() {
+    if (t_line_slot < 0) {
+        t_line_slot = (int)g_line_slots_used.fetch_add(1);
+        if (t_line_slot >= 16) fatal("line_wait: more than 16 waiting threads");
+    }
+    return g_line_slots[t_line_slot];
+}
+
+void line_wait_arm(LineWait& w, u32 line0, u32 line1) {
+    LineSlot& s = my_line_slot();
+    w.line0 = line0 & ~127u;
+    w.line1 = line1 & ~127u;
+    s.line0.store(w.line0, std::memory_order_relaxed);
+    s.line1.store(w.line1, std::memory_order_relaxed);
+    if (!t_line_registered) { g_line_waiters.fetch_add(1, std::memory_order_seq_cst); t_line_registered = true; }
+    w.armed = true;
+    w.seq = s.seq.load(std::memory_order_seq_cst);
+    std::atomic_thread_fence(std::memory_order_seq_cst);   // (the registration before the caller's check)
+}
+
+bool line_wait_block(LineWait& w, u32 timeout_ms) {
+    LineSlot& s = my_line_slot();
+    if (!t_line_registered || s.line0.load(std::memory_order_relaxed) != w.line0 ||
+        s.line1.load(std::memory_order_relaxed) != w.line1) {
+        line_wait_arm(w, w.line0, w.line1);   // another wait of this thread took the slot: register again, check first
+        return false;
+    }
+    const u32 before = w.seq;
+    s.sleeping.store(1, std::memory_order_seq_cst);
+    if (s.seq.load(std::memory_order_seq_cst) == w.seq) futex_wait(&s.seq, w.seq, timeout_ms);
+    s.sleeping.store(0, std::memory_order_relaxed);
+    w.seq = s.seq.load(std::memory_order_seq_cst);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    return w.seq != before;
+}
+
+void line_wait_release(LineWait& w) {
+    if (!w.armed) return;
+    w.armed = false;
+    LineSlot& s = my_line_slot();
+    if (!t_line_registered || s.line0.load(std::memory_order_relaxed) != w.line0) return;   // (another wait's now)
+    s.line0.store(~0u, std::memory_order_relaxed);
+    s.line1.store(~0u, std::memory_order_relaxed);
+    g_line_waiters.fetch_sub(1, std::memory_order_seq_cst);
+    t_line_registered = false;
+}
+
+// The job manager's waits (0x551228, 0x5513BC): r3 + 4 points to a block whose 16-bit job counters at +0x12..+0x1F the
+// SPUs advance. Spin ~20 us (short waits keep their latency), then arm on the counters' lines and block; a pause of more
+// than 50 us between calls means a new wait. F1CE_SPIN_WAIT=1: the old spin with yields.
+void ppu_spin(PPUContext& c) {
+    static const bool old_spin = getenv("F1CE_SPIN_WAIT") != nullptr;
+    static thread_local u32 n = 0;
+    if (old_spin) {
+        for (int i = 0; i < 8; i++) _mm_pause();
+        if ((++n & 63) == 0) std::this_thread::yield();
+        return;
+    }
+    static thread_local LineWait w;
+    static thread_local u64 start = 0, last = 0;
+    const u64 now = time_usec();
+    if (now - last > 50) start = now;
+    last = now;
+    if (now - start < 20) {
+        for (int i = 0; i < 8; i++) _mm_pause();
+        return;
+    }
+    const u32 p = ld32((u32)c.r[3] + 4);
+    const u32 l0 = (p + 0x12) & ~127u, l1 = (p + 0x1F) & ~127u;
+    if (!w.armed || l0 != w.line0) {
+        line_wait_arm(w, l0, l1);   // (the loop reads the counters once more before the next call blocks)
+        return;
+    }
+    line_wait_block(w, 1);
+    last = time_usec();
+}
+// Sleeps until time_usec() reaches t: a high-resolution timer for all but the last ~0.6 ms (its granularity on Windows is
+// ~0.5 ms; sleep_for is ~2 ms), then yields.
+void sleep_until_precise(u64 t) {
+    u64 now = time_usec();
+    if (now >= t) return;
+#ifdef _WIN32
+    if (t - now > 700) {
+        static thread_local HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /* HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+        if (timer) {
+            LARGE_INTEGER due;
+            due.QuadPart = -(LONGLONG)(t - now - 600) * 10;
+            if (SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0)) WaitForSingleObject(timer, INFINITE);
+        } else {
+            sleep_usec(t - now - 2000 > 0 && t - now > 2500 ? t - now - 2000 : 0);
+        }
+    }
+#else
+    if (t - now > 300) {
+        struct timespec ts = {(time_t)((t - now - 200) / 1000000), (long)((t - now - 200) % 1000000) * 1000};
+        nanosleep(&ts, nullptr);
+    }
+#endif
+    while (time_usec() < t) std::this_thread::yield();
+}
+
+// names host threads (debuggers, F1CE_THREAD_CPU)
+void set_thread_name(const char* name) {
+#ifdef _WIN32
+    using Fn = HRESULT(WINAPI*)(HANDLE, PCWSTR);
+    static const Fn fn = (Fn)(void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetThreadDescription");
+    if (!fn) return;
+    wchar_t w[64];
+    int i = 0;
+    for (; name[i] && i < 63; i++) w[i] = (wchar_t)(unsigned char)name[i];
+    w[i] = 0;
+    fn(GetCurrentThread(), w);
+#else
+    (void)name;
+#endif
+}
+
+// F1CE_THREAD_CPU=1: with the "cpu:" line, the cores used by each thread over the last window (threads above 2%)
+void log_thread_cpu() {
+#ifdef _WIN32
+    static const bool on = getenv("F1CE_THREAD_CPU") != nullptr;
+    if (!on) return;
+    using Fn = HRESULT(WINAPI*)(HANDLE, PWSTR*);
+    static const Fn get_desc = (Fn)(void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetThreadDescription");
+    static std::map<DWORD, u64> last;
+    static u64 last_wall = 0;
+    const u64 wall = time_usec();
+    const DWORD pid = GetCurrentProcessId();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    THREADENTRY32 te{};
+    te.dwSize = sizeof(te);
+    std::vector<std::pair<double, std::string>> rows;
+    std::map<DWORD, u64> now;
+    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+        if (te.th32OwnerProcessID != pid) continue;
+        HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
+        if (!h) continue;
+        FILETIME c, e, k, u;
+        if (GetThreadTimes(h, &c, &e, &k, &u)) {
+            auto us = [](const FILETIME& f) { return (((u64)f.dwHighDateTime << 32) | f.dwLowDateTime) / 10; };
+            const u64 t = us(k) + us(u);
+            now[te.th32ThreadID] = t;
+            auto it = last.find(te.th32ThreadID);
+            if (last_wall && it != last.end()) {
+                const double cores = (double)(t - it->second) / (double)(wall - last_wall);
+                if (cores >= 0.02) {
+                    std::string name = "tid " + std::to_string(te.th32ThreadID);
+                    PWSTR d = nullptr;
+                    if (get_desc && SUCCEEDED(get_desc(h, &d)) && d && d[0]) {
+                        name.clear();
+                        for (PWSTR p = d; *p; p++) name += (char)*p;
+                    }
+                    if (d) LocalFree(d);
+                    rows.push_back({cores, name});
+                }
+            }
+        }
+        CloseHandle(h);
+    }
+    CloseHandle(snap);
+    last.swap(now);
+    if (last_wall) {
+        std::sort(rows.begin(), rows.end(), [](auto& a, auto& b) { return a.first > b.first; });
+        std::string s;
+        char b[96];
+        for (auto& [cores, name] : rows) { snprintf(b, sizeof(b), " %s %.2f", name.c_str(), cores); s += b; }
+        LOG_I("thread cpu:%s", s.c_str());
+    }
+    last_wall = wall;
+#endif
+}
+
 u64 process_cpu_usec() {
 #ifdef _WIN32
     FILETIME created, exited, kernel, user;
@@ -334,6 +550,7 @@ PPUThread* thread_create_host(const std::string& name, std::function<void(PPUCon
     PPUThread* t = thread_create(dummy_opd, 0, 1, 0x10000, false, name, &id);
     t->host = std::thread([t, body = std::move(body)] {
         t_self = t;
+        set_thread_name(t->name.c_str());
         try {
             body(t->ctx);
         } catch (const ThreadExit&) {
@@ -387,7 +604,10 @@ SpinLock& atomic_lock(u32 ea) { return g_atomic_locks[((ea >> 7) ^ (ea >> 17)) &
 // (Tried 2026-11-03: the generation in the lock stripe's cache line was ~2% slower on the grid.)
 static std::atomic<u32> g_line_gen[4096];
 u32 line_generation(u32 ea) { return g_line_gen[(ea >> 7) & 4095].load(std::memory_order_relaxed); }
-void line_written(u32 ea) { g_line_gen[(ea >> 7) & 4095].fetch_add(1, std::memory_order_relaxed); }
+void line_written(u32 ea) {
+    g_line_gen[(ea >> 7) & 4095].fetch_add(1, std::memory_order_relaxed);
+    guest_written(ea, 1);
+}
 
 u32 ppu_lwarx(PPUContext& c, u32 ea) {
     std::lock_guard lk(atomic_lock(ea));
@@ -457,7 +677,8 @@ PPUThread* thread_create(u32 entry_opd, u64 arg, s32 prio, u32 stack_size, bool 
 void place_thread(int kind);
 static void thread_body(PPUThread* t) {
     t_self = t;
-    if (t->id == 0x01000000) place_thread(1);
+    set_thread_name(("ppu " + t->name).c_str());
+    if (t->id == 0x01000000) { place_thread(1); raise_thread_priority(); }
     try {
         call_indirect(t->ctx, t->ctx.pc);
         t->exit_status = t->ctx.r[3];
@@ -548,13 +769,38 @@ void start_profiler() {
 void place_thread(int kind) {
 #ifdef _WIN32
     static const char* pin = getenv("F1CE_PIN");
-    const u32 n = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    DWORD_PTR proc_mask = 0, sys_mask = 0;
+    GetProcessAffinityMask(GetCurrentProcess(), &proc_mask, &sys_mask);
+    const u32 n = proc_mask == sys_mask ? GetActiveProcessorCount(ALL_PROCESSOR_GROUPS) : 0;   // (not with F1CE_CPUS)
     if ((pin && pin[0] == '0') || n < 12 || n > 64 || (n & 1)) return;
     const u64 all = n == 64 ? ~0ull : (1ull << n) - 1;
     const bool only_rsx = !pin || pin[0] != '1';
     if (only_rsx && kind == 1) return;
     const u64 mask = kind == 0 ? 1ull << (n - 2) : kind == 1 ? 1ull << (n - 4) : all >> (only_rsx ? 2 : 4);
     if (!SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)mask)) LOG_W("place_thread: affinity not set");
+#endif
+}
+
+// Threads on the frame's critical path (the main PPU thread, SPURS task threads: main waits for their flags) run above
+// the SPU workers' priority, so on a machine with fewer cores than busy threads they are not queued behind a worker.
+// F1CE_PRIO=0: all at normal priority.
+void raise_thread_priority() {
+#ifdef _WIN32
+    static const bool off = getenv("F1CE_PRIO") && getenv("F1CE_PRIO")[0] == '0';
+    if (!off) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+#endif
+}
+
+// Test aid: F1CE_CPUS=<n> runs the process on its first n logical processors (e.g. 8 for a 4-core / 8-thread machine such
+// as the Steam Deck; this one has two logical processors per core, so the first n are n / 2 cores).
+void limit_cpus() {
+#ifdef _WIN32
+    const char* e = getenv("F1CE_CPUS");
+    if (!e) return;
+    const int n = atoi(e);
+    if (n <= 0 || n >= 64) return;
+    if (SetProcessAffinityMask(GetCurrentProcess(), (DWORD_PTR)((1ull << n) - 1))) LOG_I("F1CE_CPUS: %d logical processors", n);
+    else LOG_W("F1CE_CPUS: affinity not set");
 #endif
 }
 
@@ -747,7 +993,21 @@ void start_watchdog(u32 period_s) {
                         LOG_I("      jobs:%s", jobs.c_str());
                     }
                 }
+                if (c.cur_fn == 0x4d31cc) {   // audio thread waiting for its three job lists (fn 0x551358 each, from r29)
+                    const u32 slots = (u32)c.r[29];
+                    for (u32 k = 0; k < 3 && mem::readable(slots + 4 * k, 4); k++) {
+                        const u32 jl = ld32(slots + 4 * k);
+                        const u32 q = mem::readable(jl, 0x28) ? ld32(jl + 4) : 0;
+                        if (!mem::readable(q, 0x20)) continue;
+                        std::string cs;
+                        for (u32 j = 0; j < 7; j++) cs += " " + std::to_string(ld16(q + 0x12 + 2 * j));
+                        LOG_I("      audio wait %u: list %08x queue %08x target=%u top=%u head+spus:%s", k, jl, q,
+                              ld16(jl + 0x26), ld16(q + 0x10), cs.c_str());
+                    }
+                }
             }
+            extern void spurs_watchdog_report();
+            spurs_watchdog_report();
         }
     }).detach();
 }

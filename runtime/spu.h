@@ -21,6 +21,8 @@ struct SpuAotCluster {
 extern const SpuAotCluster g_spu_aot_clusters[];
 extern const u32 g_spu_aot_cluster_count;
 
+struct SpuDmaRec { u32 cmd, lsa, ea, size, tag; };
+
 // the C library's memcmp compares bytes; these are at most 128 bytes
 FORCE_INLINE bool same_bytes(const u8* a, const u8* b, u32 n) {
     for (; n >= 32; a += 32, b += 32, n -= 32)
@@ -167,6 +169,7 @@ struct SPUThread {
         return line_ver[l];
     }
     u64 st_fast = 0, st_slow = 0, st_build = 0;   // dispatch statistics (logged with the SPURS report)
+    u64 st_slow_tsc = 0, st_build_tsc = 0;        // TSC ticks spent in slow dispatches / block rebuilds
     u64 st_interp = 0;   // instructions run by the interpreter (blocks without an ahead-of-time translation)
     std::vector<u64> cluster_ver;   // per cluster: version sum of its lines when its words last matched (0 = never)
     std::vector<u64> cluster_ok;    // per cluster: epoch of its home region when its lines last matched that sum
@@ -213,6 +216,12 @@ struct SPUThread {
     Block* build_block(u32 pc);
     void flush_blocks();
     std::function<void(SPUThread&, u32 cmd, u32 lsa, u32 ea, u32 size)> on_dma;
+    // checks (F1CE_PM_CHECK): when set, MFC commands are logged here and only gets reach memory (puts and atomics do not)
+    std::vector<SpuDmaRec>* dma_log = nullptr;
+    u32 dry_line_ea = ~0u;   // with dma_log: the line its conditional stores wrote, kept here instead of in memory
+    u8 dry_line[128];
+    // this thread runs the game's job manager policy module: its native functions may replace the SPU code (spu_pm.cpp)
+    bool pm_native = false;
 
     bool halted = false;
     u64 instructions = 0;
@@ -233,3 +242,10 @@ struct SPUThread {
 
 // Loads an SPU ELF image (from guest memory) into local store; returns the entry point.
 u32 spu_load_elf(SPUThread& spu, u32 elf_ea);
+
+// Interprets from spu.pc until pc == to or the SPU halts; returns the instructions run, or ~0 after `limit` (checks).
+u64 spu_interpret_to(SPUThread& spu, u32 to, u64 limit);
+
+// native job manager (spu_pm.cpp): whether a policy module image is the one its native functions were written from
+bool spu_pm_image_ok(const u8* image, u32 size);
+extern bool g_pm_native;   // F1CE_PM_NATIVE=0: the original code only

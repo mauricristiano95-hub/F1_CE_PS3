@@ -10,15 +10,19 @@
 
 #include <unordered_map>
 #include <set>
+#include <condition_variable>
 #include <deque>
 #include <map>
 #include <vector>
+void set_thread_name(const char* name);   // core.cpp
 
 double watch_after();   // core.cpp (debug)
 u64 dma_count(int k);   // spu.cpp (profiling)
 void line_written(u32 ea);         // core.cpp: a write under the lock (fails SPU PUTLLCs on the line)
 void place_thread(int kind);   // core.cpp
 void profile_register_thread();   // core.cpp (host profiler)
+extern std::atomic<u64> g_pm_skips;           // spu_pm.cpp: job queue skip entries passed (diagnostics)
+extern std::atomic<u32> g_pm_skip_run_max;
 std::atomic<int> g_worker_wid[8] = {-1, -1, -1, -1, -1, -1, -1, -1};   // profiling (F1CE_PROFILE): workload each SPU worker runs
 
 namespace {
@@ -59,6 +63,7 @@ struct Workload {
     u64 last_run = 0;       // time_usec() of the last time it got an SPU
     u64 runs = 0;
     u64 insns = 0;
+    bool pm_native = false;   // its PM is the job manager whose functions spu_pm.cpp has natively
 };
 
 struct SpursState {
@@ -76,6 +81,7 @@ SPUThread* g_spu_by_wkl[16] = {};
 std::atomic<u32> g_ready_calls[16];
 SPUThread* g_worker_spu[8] = {};   // diagnostics
 std::atomic<u64> g_task_interp{0};  // instructions the SPURS tasks ran in the interpreter (summed when each task ends)
+std::atomic<u64> g_task_runs{0}, g_task_usec{0};   // SPURS task runs and their time (SPURS report)
 std::atomic<u64> g_worker_busy[8];   // profiling: microseconds each SPU worker spent running workloads   // cellSpursReadyCountStore calls per workload (diagnostics)   // SPU currently running each workload (diagnostics)
 
 // true if another workload has signalled work (ready count > 0) and has no SPU. Workloads that are
@@ -109,6 +115,7 @@ u64 run_workload(SPUThread& spu, u32 wid, const Workload& w) {
     spu.gpr[4].d[1] = w.arg;
     spu.pc = PM_BASE;
     spu.kernel_limit = PM_BASE;
+    spu.pm_native = w.pm_native;
     spu.instructions = 0;
     spu.interrupts = false;
     spu.event_mask = spu.event_stat = spu.stall_stat = 0;
@@ -121,7 +128,13 @@ u64 run_workload(SPUThread& spu, u32 wid, const Workload& w) {
             s.pc = s.pref(0) & 0x3FFFC;   // return to the caller (link in r0)
             return true;
         }
-        fatal("SPURS wkl %u: PM branched to unknown kernel address %05x (r0=%05x)", wid, s.pc, s.pref(0));
+        std::string tr;   // with F1CE_TRACE_WKL=<wid>: the last blocks run
+        if (s.pc_trace)
+            for (size_t k = s.pc_trace->size() > 40 ? s.pc_trace->size() - 40 : 0; k < s.pc_trace->size(); k++) {
+                char b[8]; snprintf(b, sizeof(b), " %05x", (*s.pc_trace)[k]); tr += b;
+            }
+        fatal("SPURS wkl %u: PM branched to unknown kernel address %05x (r0=%05x srr0=%05x ints=%d ev=%x/%x)%s", wid, s.pc, s.pref(0),
+              s.srr0, s.interrupts, s.event_stat, s.event_mask, tr.c_str());
     };
     spu.on_send_event = spurs_send_event;
     // the pit-entry job (job manager wkl 5) asserts that interrupts are enabled and stopped with stopd: the job never
@@ -252,6 +265,7 @@ void spu_profiler(u32 n) {
 }
 
 void spu_worker(u32 num) {
+    set_thread_name(("spu w" + std::to_string(num)).c_str());
     place_thread(2);
     if (!getenv("F1CE_HOST_PROFILE_RSX")) profile_register_thread();
     auto spu = std::make_unique<SPUThread>();
@@ -260,6 +274,8 @@ void spu_worker(u32 num) {
     g_worker_spu[num & 7] = spu.get();
     u32 idle_streak = 0;
     u64 idle_since = 0;
+    LineWait idle_lw;
+    static const bool old_idle = getenv("F1CE_SPIN_WAIT") != nullptr;
     for (;;) {
         int wid = -1;
         Workload w;
@@ -305,7 +321,17 @@ void spu_worker(u32 num) {
                 w = g_sp.wkl[wid];
             }
         }
-        if (wid < 0) { idle_wait(idle_since, 100); continue; }
+        if (wid < 0) {
+            // nothing ready: block until the ready counts' line is written (SPU atomics, PPU atomics and HLE updates
+            // notify; 1 ms at most, which also covers rule 2), after a short spin for the gaps between jobs
+            if (old_idle) { idle_wait(idle_since, 100); continue; }
+            const u64 now = time_usec();
+            if (!idle_since) idle_since = now;
+            if (now - idle_since < 30) { for (int i = 0; i < 16; i++) _mm_pause(); continue; }
+            if (!idle_lw.armed) { line_wait_arm(idle_lw, g_sp.ea, g_sp.ea); continue; }   // (checks once more first)
+            line_wait_block(idle_lw, 1);
+            continue;
+        }
         idle_since = 0;
         u64 run_t0 = time_usec();
         g_worker_wid[num & 7].store(wid, std::memory_order_relaxed);
@@ -419,19 +445,42 @@ void spu_worker(u32 num) {
                             cw += b; last_cw[k] = t->code_writes;
                         }
                     LOG_I("SPU code invalidations per second:%s", cw.c_str());
-                    static u64 last_st[4] = {};
-                    u64 st[4] = {};
+                    static u64 last_st[6] = {};
+                    u64 st[6] = {};
                     for (u32 k = 0; k < 8; k++)
-                        if (SPUThread* t = g_worker_spu[k]) { st[0] += t->st_fast; st[1] += t->st_slow; st[2] += t->st_build; st[3] += t->st_interp; }
+                        if (SPUThread* t = g_worker_spu[k]) {
+                            st[0] += t->st_fast; st[1] += t->st_slow; st[2] += t->st_build; st[3] += t->st_interp;
+                            st[4] += t->st_slow_tsc; st[5] += t->st_build_tsc;
+                        }
                     st[3] += g_task_interp.load(std::memory_order_relaxed);
+                    {   // SPURS tasks (a host thread each)
+                        static u64 last_runs = 0, last_us = 0;
+                        const u64 runs = g_task_runs.load(), us = g_task_usec.load();
+                        LOG_I("SPURS tasks: %.0f runs/s, %.2f cores", (runs - last_runs) / 5.0, (us - last_us) / 5e6);
+                        static u64 last_skips = 0;
+                        const u64 skips = g_pm_skips.load();
+                        LOG_I("job queue skips: %.0f/s, longest run %u", (skips - last_skips) / 5.0, g_pm_skip_run_max.exchange(0));
+                        last_skips = skips;
+                        last_runs = runs;
+                        last_us = us;
+                    }
                     LOG_I("SPU dispatches per second: fast %llu slow %llu rebuilt %llu", (unsigned long long)((st[0] - last_st[0]) / 5),
                           (unsigned long long)((st[1] - last_st[1]) / 5), (unsigned long long)((st[2] - last_st[2]) / 5));
+                    {   // time in the slow path, in worker cores (TSC rate measured against the host clock)
+                        static u64 tsc0 = __rdtsc(), us0 = time_usec();
+                        const u64 tsc1 = __rdtsc(), us1 = time_usec();
+                        const double hz = (double)(tsc1 - tsc0) * 1e6 / (double)(us1 - us0), sec = (us1 - us0) / 1e6;
+                        LOG_I("SPU slow dispatch time: %.3f cores (rebuilds %.3f)", (st[4] - last_st[4]) / hz / sec,
+                              (st[5] - last_st[5]) / hz / sec);
+                        tsc0 = tsc1;
+                        us0 = us1;
+                    }
                     // untranslated code is ~10x slower: a game situation never recorded (rain was) shows up here
                     const u64 interp = (st[3] - last_st[3]) / 5;
                     if (interp > 2000000)
                         LOG_W("SPU: %.1f M interpreted instructions/s - record them with F1CE_SPU_DUMP_BLOCKS and run tools/spu_aot.py",
                               interp / 1e6);
-                    for (int k = 0; k < 4; k++) last_st[k] = st[k];
+                    for (int k = 0; k < 6; k++) last_st[k] = st[k];
                 }
                 LOG_I("SPURS runs/instructions:%s  ready=%02x%02x%02x%02x%02x%02x%02x%02x%02x", r.c_str(),
                       ld8(g_sp.ea), ld8(g_sp.ea + 1), ld8(g_sp.ea + 2), ld8(g_sp.ea + 3), ld8(g_sp.ea + 4),
@@ -448,6 +497,39 @@ void spu_worker(u32 num) {
     }
 }
 }  // namespace
+
+// Watchdog (core.cpp): what each SPU worker runs and the scheduler's view of every workload (racy, diagnostics only).
+// The SPURS report above is printed only when a run ends, so a freeze with every worker idle or stuck shows nothing.
+void spurs_watchdog_report() {
+    if (!g_sp.ea) return;
+    std::string ws;
+    for (u32 k = 0; k < g_sp.nspus && k < 8; k++) {
+        SPUThread* t = g_worker_spu[k];
+        char b[96];
+        snprintf(b, sizeof(b), " spu%u:w%d pc=%05x n=%llu ev=%x/%x", k, g_worker_wid[k].load(), t ? t->pc : 0,
+                 t ? (unsigned long long)t->instructions : 0ull, t ? t->event_stat : 0, t ? t->event_mask : 0);
+        ws += b;
+    }
+    LOG_I("  spurs workers:%s", ws.c_str());
+    const u64 now = time_usec();
+    std::string ls;
+    for (u32 i = 0; i < 16; i++) {
+        const Workload& w = g_sp.wkl[i];
+        if (!w.used) continue;
+        char b[80];
+        snprintf(b, sizeof(b), " w%u:ready%u/run%u/max%u/idle%.1fs", i, ld8(g_sp.ea + i), w.running, w.max_contention,
+                 w.last_run ? (now - w.last_run) / 1e6 : -1.0);
+        ls += b;
+    }
+    LOG_I("  spurs workloads:%s", ls.c_str());
+    for (u32 i = 0; i < 16; i++) {
+        const Workload& w = g_sp.wkl[i];
+        if (!w.used || w.pm != g_sp.wkl[1].pm || !mem::readable((u32)w.arg, 64)) continue;   // job managers: queue head
+        std::string h;
+        for (u32 k = 0; k < 64; k += 4) { char b[12]; snprintf(b, sizeof(b), " %08x", ld32((u32)w.arg + k)); h += b; }
+        LOG_I("  wkl %u ctrl %08x:%s", i, (u32)w.arg, h.c_str());
+    }
+}
 
 HLE_FUNC(cellSpursInitialize) {
     LOG_I("cellSpursInitialize(spurs=%08llx, nSpus=%lld, prio=%lld)", (unsigned long long)ARG(0), (long long)ARG(1),
@@ -514,9 +596,10 @@ HLE_FUNC(cellSpursAddWorkload) {
     w.size = (u32)ARG(3);
     w.max_contention = std::clamp<u32>((u32)ARG(7), 1, std::max(1u, g_sp.nspus));
     w.arg = ARG(4);
+    w.pm_native = g_pm_native && spu_pm_image_ok(gmem(w.pm), w.size);
     st32((u32)ARG(1), wid);
-    LOG_I("SPURS workload %u: pm=%08x size=%x arg=%016llx contention %llu..%llu", wid, w.pm, w.size,
-          (unsigned long long)w.arg, (unsigned long long)ARG(6), (unsigned long long)ARG(7));
+    LOG_I("SPURS workload %u: pm=%08x size=%x arg=%016llx contention %llu..%llu%s", wid, w.pm, w.size,
+          (unsigned long long)w.arg, (unsigned long long)ARG(6), (unsigned long long)ARG(7), w.pm_native ? " (native job manager)" : "");
     if (!g_sp.started) {
         g_sp.started = true;
         // F1CE_SPURS_SPUS overrides the number of SPU workers (debugging)
@@ -645,6 +728,7 @@ void dump_flag_stall(u32 f, u16 mask, u32 mode) {
 }
 
 void run_task(u32 tid, Task t) {
+    set_thread_name("spu task");
     auto spu = take_task_context(t.elf);
     {
         std::lock_guard lk(g_live_m);
@@ -727,7 +811,10 @@ void run_task(u32 tid, Task t) {
     if (logged++ < 30)
         LOG_I("SPURS task %u: start elf=%08x entry=%05x arg=%016llx%016llx", tid, t.elf, entry, (unsigned long long)t.arg[0],
               (unsigned long long)t.arg[1]);
+    const u64 task_t0 = time_usec();
     spu->run();
+    g_task_runs.fetch_add(1, std::memory_order_relaxed);
+    g_task_usec.fetch_add(time_usec() - task_t0, std::memory_order_relaxed);
     g_task_interp.fetch_add(spu->st_interp, std::memory_order_relaxed);   // (SPURS report: untranslated code)
     spu->st_interp = 0;
     {
@@ -737,6 +824,41 @@ void run_task(u32 tid, Task t) {
     }
     std::lock_guard lk(g_task_pool_m);
     g_task_pool.emplace(t.elf, std::move(spu));
+}
+
+// Task threads are kept and reused: a new task wakes an idle one (creating a thread per task cost tens of microseconds
+// each, ~500 times per second, on the path of main's waits for the tasks' flags). A thread is created only when none is
+// idle, so a task that waits for another (queues between tasks) never holds the next one back.
+std::mutex g_task_q_m;
+std::condition_variable g_task_q_cv;
+std::deque<std::pair<u32, Task>> g_task_q;
+u32 g_task_idle = 0;
+void task_thread() {
+    raise_thread_priority();
+    for (;;) {
+        std::pair<u32, Task> job;
+        {
+            std::unique_lock lk(g_task_q_m);
+            g_task_idle++;
+            g_task_q_cv.wait(lk, [] { return !g_task_q.empty(); });
+            g_task_idle--;
+            job = g_task_q.front();
+            g_task_q.pop_front();
+        }
+        run_task(job.first, job.second);
+    }
+}
+void start_task(u32 tid, const Task& t) {
+    static const bool per_task = getenv("F1CE_TASK_THREADS") != nullptr;   // debug: a new thread per task, as before
+    if (per_task) { std::thread(run_task, tid, t).detach(); return; }
+    bool spawn;
+    {
+        std::lock_guard lk(g_task_q_m);
+        spawn = g_task_idle <= g_task_q.size();   // every idle thread already has a task waiting for it
+        g_task_q.push_back({tid, t});
+    }
+    if (spawn) std::thread(task_thread).detach();
+    else g_task_q_cv.notify_one();
 }
 }  // namespace
 
@@ -748,7 +870,7 @@ HLE_FUNC(cellSpursCreateTask) {
     u32 tid = (u32)g_tasks.size();
     g_tasks.push_back(t);
     st32((u32)ARG(1), tid);
-    std::thread(run_task, tid, t).detach();
+    start_task(tid, t);
     RET(CELL_OK);
 }
 
@@ -790,9 +912,20 @@ HLE_FUNC(cellSpursEventFlagClear) {
     RET(CELL_OK);
 }
 // cellSpursEventFlagWait(eventFlag, u16* mask, mode)  mode: 0 = AND, 1 = OR; *mask receives the event bits
+// waits of the PPU-side SPURS calls: the first call arms on the object's line (the loop checks once more), later ones block
+// until the line is written (SPU or PPU atomics, HLE updates) or 1 ms passed; F1CE_SPIN_WAIT=1: the old 50 us spin
+static void line_block(LineWait& lw, u32 ea) {
+    static const bool old_spin = getenv("F1CE_SPIN_WAIT") != nullptr;
+    if (old_spin) { sleep_usec(50); return; }
+    if (!lw.armed) { line_wait_arm(lw, ea, ea); return; }
+    line_wait_block(lw, 1);
+}
+
 static s32 flag_wait(u32 f, u32 mask_ptr, u32 mode, bool block) {
     u16 mask = ld16(mask_ptr);
     u64 wait_start = 0;
+    LineWait lw;
+    struct Rel { LineWait& w; ~Rel() { line_wait_release(w); } } rel{lw};
     bool dumped = false;
     for (u64 spins = 0;; spins++) {
         if (block && !dumped && spins >= 64) {
@@ -809,7 +942,8 @@ static s32 flag_wait(u32 f, u32 mask_ptr, u32 mode, bool block) {
             }
         }
         if (!block) return (s32)0x80410901;   // CELL_SPURS_TASK_ERROR_AGAIN
-        if (spins < 64) std::this_thread::yield(); else sleep_usec(50);
+        if (spins < 64) std::this_thread::yield();
+        else line_block(lw, f);
     }
 }
 HLE_FUNC(cellSpursEventFlagWait) { RET(flag_wait((u32)ARG(0), (u32)ARG(1), (u32)ARG(2), true)); }
@@ -841,6 +975,8 @@ s32 queue_op(u32 q, u32 data, bool blocking, bool pop_side) {
             LOG_I("SPURS queues (PPU side):%s", r.c_str());
         }
     }
+    LineWait lw;
+    struct Rel { LineWait& w; ~Rel() { line_wait_release(w); } } rel{lw};
     for (u64 spins = 0;; spins++) {
         {
             std::lock_guard lk(atomic_lock(q));
@@ -860,7 +996,8 @@ s32 queue_op(u32 q, u32 data, bool blocking, bool pop_side) {
             }
         }
         if (!blocking) return (s32)0x80410901;   // CELL_SPURS_TASK_ERROR_AGAIN
-        if (spins < 64) std::this_thread::yield(); else sleep_usec(50);
+        if (spins < 64) std::this_thread::yield();
+        else line_block(lw, q);
     }
 }
 }  // namespace

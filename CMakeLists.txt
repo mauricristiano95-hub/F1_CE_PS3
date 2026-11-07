@@ -38,10 +38,14 @@ set(RUNTIME_SOURCES
   runtime/hle_cubemap.cpp
   runtime/hle_skipfn.cpp
   runtime/hle_quickrace.cpp
+  runtime/hle_boot.cpp
+  runtime/hle_physics.cpp
+  runtime/hle_rumble.cpp
   runtime/hle_gcm.cpp
   runtime/hle_spurs.cpp
   runtime/hle_savedata.cpp
   runtime/spu.cpp
+  runtime/spu_pm.cpp
 )
 if(F1CE_HOST STREQUAL "SDL")
   list(APPEND RUNTIME_SOURCES runtime/host_sdl.cpp runtime/rsx.cpp runtime/rsx_common.cpp runtime/rsx_gl.cpp)
@@ -100,7 +104,7 @@ if(F1CE_HOST STREQUAL "SDL")
     target_include_directories(f1ce PRIVATE third_party/SDL3-3.4.18/src/video/khronos)   # Vulkan headers
   endif()
   if(WIN32)
-    target_link_libraries(f1ce PRIVATE opengl32 winmm)
+    target_link_libraries(f1ce PRIVATE opengl32 winmm synchronization)
   endif()
 endif()
 if(WIN32)

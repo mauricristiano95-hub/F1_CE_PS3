@@ -110,10 +110,32 @@ struct PPUContext {
 #define PPU_DECL(name) void name(PPUContext& __restrict c)
 #define PPU_FUNC(name) void name(PPUContext& __restrict c)
 #define PPU_LOOP() __asm__ volatile("" : : : "memory")
-// Head of a loop that only polls memory written by the SPUs (tools/recomp.py SPIN_LOOPS): it leaves the core to the other
-// hardware thread, and the processor to a worker when the threads outnumber the cores.
-void ppu_spin();   // core.cpp
-#define PPU_SPIN() ppu_spin()
+// Head of a loop that only polls memory written by the SPUs (tools/recomp.py SPIN_LOOPS: the job manager's waits for job
+// counters): after a short spin it blocks until an SPU writes the counters' line (see LineWait), so a waiting thread
+// takes no core.
+void ppu_spin(PPUContext& c);   // core.cpp
+#define PPU_SPIN() ppu_spin(c)
+
+// Blocking waits on guest memory (core.cpp). A waiting thread registers up to two 128-byte lines; writers of guest memory
+// from other threads (SPU DMA puts and atomics, PPU atomics, HLE updates: everything that calls line_written) call
+// guest_written, which wakes the waiters of an overlapping line. Plain PPU stores do not: waits time out after ~1 ms.
+extern std::atomic<u32> g_line_waiters;
+void guest_written_slow(u32 ea, u32 size);
+FORCE_INLINE void guest_written(u32 ea, u32 size) {
+    std::atomic_thread_fence(std::memory_order_seq_cst);   // (the write before, the registration check after)
+    if (__builtin_expect(g_line_waiters.load(std::memory_order_relaxed) != 0, 0)) guest_written_slow(ea, size);
+}
+struct LineWait {   // one per wait site; the slot it registers in belongs to the thread (one active wait per thread)
+    u32 line0 = ~0u, line1 = ~0u;
+    u32 seq = 0;
+    bool armed = false;
+};
+// arm: registers the lines (a new value of seq); the caller must then check its condition once more before block
+void line_wait_arm(LineWait& w, u32 line0, u32 line1);
+// block: sleeps until a write to the lines since arm, or the timeout; re-arms (check the condition again afterwards).
+// Returns whether a write woke it (false: timeout, or it only registered again).
+bool line_wait_block(LineWait& w, u32 timeout_ms);
+void line_wait_release(LineWait& w);
 using PPUFunc = void (*)(PPUContext&);
 
 struct FuncEntry { u32 addr; PPUFunc fn; };

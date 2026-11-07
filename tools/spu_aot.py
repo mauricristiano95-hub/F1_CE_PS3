@@ -32,7 +32,15 @@ IDIOMS = {(0x04AE4, 0x38944402, 7): "spu_idiom_fill_word",
 
 # optional shortcuts at a block's head: the helper returns true after setting pc to where to continue
 SKIPS = {(0x0D7F8, 0x4020007F, 134): "spu_skip_triangle_cull",
-         (0x0D628, 0x7A8FDCBF, 44): "spu_skip_vertex_transform"}
+         (0x0D628, 0x7A8FDCBF, 44): "spu_skip_vertex_transform",
+         # job manager policy module: functions rewritten natively (runtime/spu_pm.cpp)
+         (0x019F8, 0x42810182, 16): "spu_skip_pm_buffers",
+         (0x02D48, 0x1C000302, 15): "spu_skip_pm_dma_info",
+         (0x02CE8, 0x42168C02, 4): "spu_skip_pm_release",
+         (0x01670, 0x24FE0081, 18): "spu_skip_pm_job_done",
+         (0x02288, 0x42004032, 36): "spu_skip_pm_grab",
+         (0x00A2C, 0x00200000, 17): "spu_skip_pm_irq_enter",
+         (0x00A98, 0x40867803, 11): "spu_skip_pm_irq_leave"}
 
 
 def skip_call(pc, words, ctx, leave):
@@ -288,7 +296,11 @@ def emit_cluster(idx, c, blocks, links, names):
         if idiom_call(pc, words, x):
             out.append(f"\t{idiom_call(pc, words, x)}")
         if skip_call(pc, words, x, "goto out;"):
-            out.append(f"\t{skip_call(pc, words, x, 'goto out;')}")
+            if local:   # the native function works on the thread: the registers go back to it first (only the
+                # cluster's own are valid in L); it returns false before changing anything, so L stays good
+                out.append(f"\t{{ {wb} s.pc = L.pc; {skip_call(pc, words, 's', 'return;')} }}")
+            else:
+                out.append(f"\t{skip_call(pc, words, x, 'goto out;')}")
         for i, w in enumerate(words):
             a = (pc + 4 * i) & 0x3FFFC
             out.append(f"\t{x}.pc = 0x{a:05X}; {nm[i]}({x}, 0x{w:08X}u);")

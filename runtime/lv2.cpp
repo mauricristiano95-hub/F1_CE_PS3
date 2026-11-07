@@ -6,6 +6,7 @@
 #include <chrono>
 #include <deque>
 #include <vector>
+void set_thread_name(const char* name);   // core.cpp
 
 using namespace std::chrono;
 
@@ -83,6 +84,7 @@ struct Timer {
 IdMap<Timer> g_timers(0x11000000);
 
 void timer_thread(std::shared_ptr<Timer> t) {
+    set_thread_name("timer");
     std::unique_lock lk(t->m);
     while (!t->destroyed) {
         if (!t->running) { t->cv.wait(lk); continue; }
@@ -446,7 +448,39 @@ SYS(timer_disconnect_event_queue) {
     RET(CELL_OK);
 }
 SYS(timer_usleep) {
-    sleep_usec(ARG(0));
+    {   // debug: F1CE_USLEEP_LOG: requested sleeps per second by size, every 5 s
+        static const bool ul = getenv("F1CE_USLEEP_LOG") != nullptr;
+        if (ul) {
+            static std::mutex m;
+            static u64 b[6] = {}, window = 0, slept = 0;
+            std::lock_guard lk(m);
+            const u64 a = ARG(0);
+            b[a <= 50 ? 0 : a <= 200 ? 1 : a <= 1000 ? 2 : a <= 5000 ? 3 : a <= 20000 ? 4 : 5]++;
+            slept += a;
+            static std::map<std::string, u64> who;
+            if (a <= 200 && t_self) {
+                char k[96];
+                snprintf(k, sizeof(k), "%s lr=%08x a=%llu", t_self->name.c_str(), (u32)t_self->ctx.lr, (unsigned long long)a);
+                who[k]++;
+            }
+            const u64 now = time_usec();
+            if (!window) window = now;
+            if (now - window >= 5000000) {
+                LOG_I("usleep/s: <=50us %.0f <=200us %.0f <=1ms %.0f <=5ms %.0f <=20ms %.0f more %.0f, requested %.0f ms/s",
+                      b[0] / 5.0, b[1] / 5.0, b[2] / 5.0, b[3] / 5.0, b[4] / 5.0, b[5] / 5.0, slept / 5000.0);
+                for (auto& [k, v] : who) LOG_I("usleep small: %s %.0f/s", k.c_str(), v / 5.0);
+                who.clear();
+                for (u64& x : b) x = 0;
+                slept = 0;
+                window = now;
+            }
+        }
+    }
+    // libgcm's wait for the RSX reference (usleep(30) in a loop, 0x4EF074): blocks until the RSX moves it, instead of
+    // ~15000 polls per second (F1CE_SPIN_WAIT=1: the old way)
+    static const bool old_spin = getenv("F1CE_SPIN_WAIT") != nullptr;
+    if (!old_spin && c.pc == 0x4EF074 && ARG(0) <= 100) rsx_ref_wait();
+    else sleep_usec(ARG(0));
     // keep the PPU at most one ring slot (reference step 2) ahead of a lagging RSX: the main thread paces its frames
     // with usleep, and the game would otherwise rewrite a command list the RSX is still running (hle_gcm.cpp)
     static const bool no_throttle = getenv("F1CE_NO_RSX_THROTTLE") != nullptr;   // debug
@@ -459,7 +493,10 @@ SYS(timer_usleep) {
         u64 start = time_usec();
         // up to 15 s: at the race start the RSX can take seconds for the loading list (hundreds of textures)
         // (no limit while the renderer compiles its start-up shaders on the RSX thread)
-        while (rsx_refs_behind() > 2 && (time_usec() - start < 15000000 || g_rsx_starting)) sleep_usec(200);
+        while (rsx_refs_behind() > 2 && (time_usec() - start < 15000000 || g_rsx_starting)) {
+            if (old_spin) sleep_usec(200);
+            else rsx_ref_wait();
+        }
         static u32 n = 0;
         if (n++ < 20) LOG_I("PPU throttled %llu us: RSX behind (refs %d)", (unsigned long long)(time_usec() - start), rsx_refs_behind());
     }

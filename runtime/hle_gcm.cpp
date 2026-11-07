@@ -13,8 +13,11 @@
 #include <vector>
 #include <deque>
 #include <memory>
+void set_thread_name(const char* name);   // core.cpp
 
 namespace rsx { u64 g_last_frame_draws = 0; }
+bool shake_filter_on();   // hle_physics.cpp
+void log_thread_cpu();    // core.cpp
 u64 g_rsx_idle_us = 0;   // profiling: time the FIFO reader waited for the PPU (read by rsx_gl.cpp)
 
 void place_thread(int kind);      // core.cpp
@@ -187,14 +190,66 @@ void pace_ticks() {
     // A stopped car does not settle: its tyre forces change sign every tick and the heading swings ~0.08 degrees (the wheels
     // ~3 mm). The game shows every second tick, so that never appears; one tick per frame shows both phases and the car shakes
     // on the grid. So while it stands, a frame takes two ticks and 33 ms, as in the original game.
-    static const bool no_hold = getenv("F1CE_60FPS_NOHOLD") != nullptr;
+    // (off with the shake filter of hle_physics.cpp, which removes the swing from what is drawn)
+    static const bool no_hold = getenv("F1CE_60FPS_NOHOLD") != nullptr || shake_filter_on();
     if (!no_hold && car_standing()) {
         n = 2;
         const u64 end = previous + 2 * tick_us;
-        if (now < end) { sleep_usec(end - now); last = end; }
+        if (now < end) { sleep_until_precise(end); last = end; }
         owed = 0;
     }
+    // F1CE_FPS_CAP=<n>: frames of at least 1/n s (30: two ticks each, as the original, but with this mode's pacing: the
+    // next frame's work is not held back to a vblank, which on a slow machine kept the original mode under 30)
+    static const int cap = getenv("F1CE_FPS_CAP") ? atoi(getenv("F1CE_FPS_CAP")) : 0;
+    if (cap > 0) {
+        const u64 end = previous + 1000000 / (u64)cap;
+        if (now < end) {
+            sleep_until_precise(end);
+            owed += (s64)(end - now);
+            last = end;
+            n = std::clamp<s64>((owed + tick_us / 2) / tick_us, 1, 2);
+        }
+    }
+    static const bool fixed1 = getenv("F1CE_TICKS_FIXED") != nullptr;   // debug: one tick per frame whatever the time
+    if (fixed1) n = 1;
     owed = std::clamp<s64>(owed - n * tick_us, -tick_us, tick_us);
+    // debug: F1CE_TICK_DUMP=<s>,<ea hex>,<size hex>[,<ea hex>,<size hex>...]: <s> seconds into the first 3D scene, that
+    // memory on 32 (F1CE_TICK_DUMP_FRAMES) consecutive frames (tick_<k>.bin for the first range, tick_<k>_<ea>.bin for the others), to find values
+    // that swing from tick to tick
+    static const char* tick_dump = getenv("F1CE_TICK_DUMP");
+    if (tick_dump) {
+        static u64 since3d = 0;
+        static int k = -1;
+        static std::vector<std::vector<u8>> snaps;
+        static std::vector<std::pair<u32, u32>> ranges;
+        if (k < 0 && rsx::g_last_frame_draws >= 800) {
+            if (!since3d) since3d = now;
+            if (now - since3d >= (u64)(atof(tick_dump) * 1e6)) {
+                for (const char* p = strchr(tick_dump, ','); p && strchr(p + 1, ',');) {
+                    const char* q = strchr(p + 1, ',');
+                    ranges.emplace_back((u32)strtoul(p + 1, nullptr, 16), (u32)strtoul(q + 1, nullptr, 16));
+                    p = strchr(q + 1, ',');
+                }
+                if (ranges.empty()) ranges.emplace_back(0x10100000, 0x40000);
+                k = 0;
+            }
+        }
+        static const int frames = getenv("F1CE_TICK_DUMP_FRAMES") ? atoi(getenv("F1CE_TICK_DUMP_FRAMES")) : 32;
+        if (k >= 0 && k < frames) {
+            for (const auto& [ea, size] : ranges) snaps.emplace_back(gmem(ea), gmem(ea) + size);
+            if (++k == frames) {
+                for (int i = 0; i < frames; i++)
+                    for (size_t r = 0; r < ranges.size(); r++) {
+                        char fn[48];
+                        if (r == 0) snprintf(fn, sizeof(fn), "tick_%d.bin", i);
+                        else snprintf(fn, sizeof(fn), "tick_%d_%08x.bin", i, ranges[r].first);
+                        const auto& s = snaps[i * ranges.size() + r];
+                        if (FILE* f = fopen(fn, "wb")) { fwrite(s.data(), 1, s.size(), f); fclose(f); }
+                    }
+                LOG_I("tick dump: %d frames of %zu ranges saved (ticks per frame %lld)", frames, ranges.size(), (long long)n);
+            }
+        }
+    }
     st32(g_ticks_per_frame_ea, (u32)n);
     flips++;
     ticks += (u64)n;
@@ -212,6 +267,7 @@ void log_cpu_use() {
     if (now - window < 5000000) return;
     u64 cpu = process_cpu_usec();
     LOG_I("cpu: %.2f cores at %.1f fps", (double)(cpu - last_cpu) / (now - window), flips * 1e6 / (now - window));
+    log_thread_cpu();
     window = now; last_cpu = cpu; flips = 0;
 }
 
@@ -233,7 +289,7 @@ struct PendingWrite { u32 addr, val; };
 PendingWrite g_pending[16];
 u32 g_npending = 0;
 void flush_pending() {
-    for (u32 i = 0; i < g_npending; i++) st32(g_pending[i].addr, g_pending[i].val);
+    for (u32 i = 0; i < g_npending; i++) { st32(g_pending[i].addr, g_pending[i].val); guest_written(g_pending[i].addr, 4); }
     g_npending = 0;
 }
 void defer_st32(u32 addr, u32 val) {
@@ -244,7 +300,7 @@ void defer_st32(u32 addr, u32 val) {
 u32 g_front_ref = 0;   // the last reference value the front end executed (list snapshots age by it)
 
 u32 g_my_get = ~0u;   // the GET value the front end last wrote
-void set_get(u32 v) { st32(g.control_addr + 4, v); g_my_get = v; }
+void set_get(u32 v) { st32(g.control_addr + 4, v); g_my_get = v; guest_written(g.control_addr + 4, 4); }
 // GET at the command being run, before one that may wait for the PPU (runs of commands write it only at their end)
 void sync_get() { if (g_my_get != g_cur_get) set_get(g_cur_get); }
 
@@ -258,12 +314,28 @@ void exec_method(u32 method, u32 arg) {
             u32 a = label_ptr(rsx_state.sem_offset_406e);
             u64 start = time_usec();
             u32 before = ld32(a);
+            // after a short spin, block until the label's line is written (SPU puts and atomics, our own releases) or
+            // 1 ms passed (plain PPU stores do not wake it); F1CE_SPIN_WAIT=1: yield in a loop as before
+            static const bool old_spin = getenv("F1CE_SPIN_WAIT") != nullptr;
+            static u64 woken = 0, timeouts = 0, window = 0;
+            LineWait lw;
             while (ld32(a) != arg) {
-                if (time_usec() - start > 5000000) {
+                const u64 now = time_usec();
+                if (now - start > 5000000) {
                     LOG_W("RSX: semaphore acquire timeout @%08x want %08x have %08x", a, arg, ld32(a));
                     break;
                 }
-                std::this_thread::yield();
+                if (old_spin) { std::this_thread::yield(); continue; }
+                if (now - start < 30) { for (int i = 0; i < 16; i++) _mm_pause(); continue; }
+                if (!lw.armed) { line_wait_arm(lw, a, a); continue; }
+                (line_wait_block(lw, 1) ? woken : timeouts)++;
+            }
+            line_wait_release(lw);
+            if (!window) window = start;
+            if (start - window > 5000000) {
+                LOG_I("RSX: semaphore waits woken by a write %.0f/s, by the 1 ms timeout %.0f/s (last %08x)", woken / 5.0, timeouts / 5.0, a);
+                woken = timeouts = 0;
+                window = start;
             }
             g_sem_hist[g_sem_pos++ % 16] = {'A', a, arg, (u32)(time_usec() - start), g_cur_get, before};
             rsx::g_fe.t_sem += time_usec() - start;
@@ -371,6 +443,7 @@ void note_list_start(u32 target) {
 }
 
 void snap_watcher() {
+    set_thread_name("rsx snap");
     static const bool off = getenv("F1CE_NO_LIST_SNAP") != nullptr;   // debug
     if (off) return;
     u32 prev = 0;
@@ -577,6 +650,7 @@ FORCE_INLINE void count_nop(u32 get) {
 }
 
 void rsx_thread() {
+    set_thread_name("rsx");
     place_thread(0);
     if (getenv("F1CE_HOST_PROFILE_RSX")) profile_register_thread();
     const bool verify = getenv("F1CE_FIFO_VERIFY") != nullptr;
@@ -605,7 +679,18 @@ void rsx_thread() {
         if (put == get) {
             flush_pending();
             static u64 idle_since = 0;
-            u64 t = time_usec(); idle_wait(idle_since, 50); g_rsx_idle_us += time_usec() - t;
+            u64 t = time_usec();
+            // after 200 us without commands, block until the game writes PUT (probe after its store, put_written) or 1 ms
+            static const bool old_spin = getenv("F1CE_SPIN_WAIT") != nullptr;
+            static LineWait lw;
+            if (old_spin) idle_wait(idle_since, 50);
+            else {
+                if (!idle_since) idle_since = t;
+                if (t - idle_since < 200) std::this_thread::yield();
+                else if (!lw.armed) line_wait_arm(lw, g.control_addr, g.control_addr);   // (checks PUT once more first)
+                else line_wait_block(lw, 1);
+            }
+            g_rsx_idle_us += time_usec() - t;
             if (ld32(g.control_addr) != ld32(g.control_addr + 4)) idle_since = 0;
             continue;
         }
@@ -762,6 +847,7 @@ void rsx_thread() {
 }
 
 void vblank_thread() {
+    set_thread_name("vblank");
     u64 next = time_usec();
     // F1CE_60FPS: 119.88 Hz, as the game's limiter waits for two vblanks per frame
     const u64 period = getenv("F1CE_60FPS") ? 8342 : 16683;   // 59.94 Hz
@@ -819,6 +905,7 @@ HLE_FUNC(_cellGcmInitBody) {
 
     g.control_addr = mem::alloc(0x1000, 0x1000);
     g.label_addr = mem::alloc(0x1000, 0x1000);
+    LOG_I("gcm: control registers at %08x, labels at %08x", g.control_addr, g.label_addr);
     for (u32 i = 0; i < 256; i++) st32(g.label_addr + i * 16, 0x1337C0D3);
     g.config_addr = mem::alloc(0x40, 16);
     g.context_addr = mem::alloc(0x100, 0x100);
@@ -934,4 +1021,25 @@ u32 io_offset_to_ea(u32 io) { return io_to_ea(io); }
 }  // namespace rsx
 
 // PPU-side throttle (lv2.cpp timer_usleep)
+// A PPU wait for the RSX's reference register (the PPU throttle, libgcm's wait for command buffer space): blocks until
+// the RSX writes the control registers' line, at most 1 ms. Returns at once when the reference moved since this
+// thread's previous call, so the caller checks again first (its check was before this call).
+// the game's flip handler (0x489a2c) just stored to a label (r9) that the RSX may be waiting for (semaphore acquire):
+// plain PPU stores do not wake line waits, so this probe after the store does (tools/recomp.py PROBES)
+void flip_label_written(PPUContext& c) { guest_written((u32)c.r[9], 4); }
+
+// the game (libgcm flush, 0x48b050) just wrote PUT (r3 = the control registers): wakes an idle RSX front end
+void put_written(PPUContext& c) { guest_written((u32)c.r[3], 4); }
+
+void rsx_ref_wait() {
+    static thread_local LineWait w;
+    static thread_local u32 prev = ~0u;
+    const u32 a = g.control_addr + 8;
+    line_wait_arm(w, a, a);
+    const u32 r = ld32(a);
+    if (r != prev) { prev = r; return; }
+    line_wait_block(w, 1);
+    prev = ld32(a);
+}
+
 s32 rsx_refs_behind() { return refs_behind(); }

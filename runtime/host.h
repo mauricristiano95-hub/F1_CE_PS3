@@ -11,6 +11,7 @@ struct PadState {
 
 void init();
 PadState pad_state();
+void pad_rumble(float low, float high);   // motor strengths 0..1 (low = heavy motor), held until the next call
 void input_clock_reset();   // scripted input times count from this call (end of the start-up shader phase)
 bool quit_requested();
 void audio_push(const float* stereo, u32 frames);   // 48 kHz interleaved stereo
@@ -31,6 +32,8 @@ void gl_drawable_size(int* w, int* h);
 void* vk_begin();
 const char* const* vk_instance_extensions(u32* count);   // what the window system needs
 void* vk_create_surface(void* instance);                  // VkSurfaceKHR of the window, null on failure
-// Saves a frame (host ARGB, top-down) for F1CE_DUMP_FRAMES debugging.
+// Saves a frame (host ARGB, top-down) for F1CE_DUMP_FRAMES debugging; dump_frame_due() counts a frame and says whether
+// to dump it (call it once per frame, then dump_frame only when it is true).
+bool dump_frame_due();
 void dump_frame(const u32* argb, u32 width, u32 height);
 }  // namespace host

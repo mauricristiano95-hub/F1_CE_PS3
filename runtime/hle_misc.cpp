@@ -7,6 +7,7 @@
 #include <array>
 #include <deque>
 #include <vector>
+void set_thread_name(const char* name);   // core.cpp
 
 // ================================================================== sys_io
 HLE_FUNC(cellPadInit) { RET(CELL_OK); }
@@ -22,13 +23,15 @@ HLE_FUNC(cellPadGetInfo) {
     st8(p + 12 + 508, 1);              // status[0] = CELL_PAD_STATUS_CONNECTED
     RET(CELL_OK);
 }
-void quick_race_overrides();   // hle_quickrace.cpp (F1CE_QR_*)
+void quick_race_overrides(u32 digital1, u32 lx, u32 ly);   // hle_quickrace.cpp (F1CE_QR_*)
+void rumble_update();                                        // hle_rumble.cpp
 // CellPadData: s32 len; u16 button[64]
 HLE_FUNC(cellPadGetData) {
     u32 port = (u32)ARG(0), p = (u32)ARG(1);
     if (port != 0) { st32(p, 0); RET(CELL_OK); }
-    quick_race_overrides();
     host::PadState s = host::pad_state();
+    quick_race_overrides(s.digital1, s.lx, s.ly);
+    rumble_update();
     st32(p, 24);
     u16 b[24] = {};
     b[0] = 0;
@@ -225,6 +228,7 @@ bool g_audio_init = false;
 std::thread g_audio_thread;
 
 void audio_loop() {
+    set_thread_name("audio out");
     u64 next = time_usec();
     std::vector<float> mix(BLOCK_SAMPLES * 2);
     for (;;) {

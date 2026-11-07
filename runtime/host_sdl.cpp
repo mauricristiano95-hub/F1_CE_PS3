@@ -10,11 +10,13 @@
 #include <SDL3/SDL_vulkan.h>
 
 #include <vector>
+void set_thread_name(const char* name);   // core.cpp
 
 namespace host {
 namespace {
 std::mutex g_pad_mutex;
 PadState g_pad;
+std::atomic<u32> g_rumble{0};   // low << 16 | high, 0..0xFFFF each (pad_rumble), applied on the UI thread
 std::atomic<bool> g_quit{false};
 
 std::mutex g_win_mutex;
@@ -89,6 +91,7 @@ void update_pad(SDL_Gamepad* gp) {
 }
 
 void ui_thread() {
+    set_thread_name("ui");
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
@@ -125,6 +128,17 @@ void ui_thread() {
             }
         }
         update_pad(gp);
+        if (gp) {   // refreshed every 100 ms with a 200 ms duration, so the motors stop if the game stops updating them
+            static u32 sent = 0;
+            static u64 sent_at = 0;
+            const u32 r = g_rumble.load();
+            const u64 now = time_usec();
+            if (r != sent || (r && now - sent_at > 100000)) {
+                SDL_RumbleGamepad(gp, (Uint16)(r >> 16), (Uint16)r, r ? 200 : 0);
+                sent = r;
+                sent_at = now;
+            }
+        }
         SDL_Delay(4);
     }
 }
@@ -180,6 +194,11 @@ std::vector<ScriptedPress> parse_script() {
     return v;
 }
 }  // namespace
+
+void pad_rumble(float low, float high) {
+    auto q = [](float v) { return (u32)std::lround(std::clamp(v, 0.0f, 1.0f) * 65535.0f); };
+    g_rumble = q(low) << 16 | q(high);
+}
 
 PadState pad_state() {
     static const std::vector<ScriptedPress> script = parse_script();
@@ -264,15 +283,19 @@ void audio_push(const float* stereo, u32 frames) {
     SDL_PutAudioStreamData(g_audio, stereo, (int)(frames * 2 * sizeof(float)));
 }
 
-void dump_frame(const u32* argb, u32 width, u32 height) {
+static u32 g_dump_count = 0;
+bool dump_frame_due() {
     // debug aid: F1CE_DUMP_FRAMES=N dumps every N-th frame as raw ARGB (tools/frames_to_png.py)
     static const char* env = getenv("F1CE_DUMP_FRAMES");
     // F1CE_DUMP_FROM / F1CE_DUMP_COUNT limit the dump to a window of frames (e.g. to catch flicker)
     static const u32 from = getenv("F1CE_DUMP_FROM") ? (u32)atoi(getenv("F1CE_DUMP_FROM")) : 0;
     static const u32 limit = getenv("F1CE_DUMP_COUNT") ? (u32)atoi(getenv("F1CE_DUMP_COUNT")) : ~0u;
-    static u32 count = 0;
-    if (!env || atoi(env) <= 0 || ++count % (u32)atoi(env) != 0) return;
-    if (count < from || count - from >= limit) return;
+    if (!env || atoi(env) <= 0 || ++g_dump_count % (u32)atoi(env) != 0) return false;
+    return g_dump_count >= from && g_dump_count - from < limit;
+}
+
+void dump_frame(const u32* argb, u32 width, u32 height) {
+    const u32 count = g_dump_count;
     char name[64];
     snprintf(name, sizeof(name), "frame_%05u_%ux%u.argb", count, width, height);
     if (FILE* f = fopen(name, "wb")) {
@@ -288,7 +311,7 @@ void present(u32 ea, u32 pitch, u32 width, u32 height) {
     std::vector<u32> img((size_t)width * height);
     for (u32 y = 0; y < height; y++)
         for (u32 x = 0; x < width; x++) img[(size_t)y * width + x] = ld32(ea + y * pitch + x * 4) | 0xFF000000u;
-    dump_frame(img.data(), width, height);
+    if (dump_frame_due()) dump_frame(img.data(), width, height);
 }
 
 bool gl_begin() {

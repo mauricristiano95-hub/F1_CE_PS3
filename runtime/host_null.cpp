@@ -5,6 +5,7 @@
 namespace host {
 void init() { LOG_I("host: headless backend"); }
 PadState pad_state() { return {}; }
+void pad_rumble(float, float) {}
 void input_clock_reset() {}
 bool quit_requested() { return false; }
 void audio_push(const float*, u32) {}
@@ -18,5 +19,6 @@ void gl_swap() {}
 void* gl_create_shared_context(bool) { return nullptr; }
 bool gl_make_current(void*) { return false; }
 void gl_drawable_size(int* w, int* h) { *w = *h = 0; }
+bool dump_frame_due() { return false; }
 void dump_frame(const u32*, u32, u32) {}
 }  // namespace host
