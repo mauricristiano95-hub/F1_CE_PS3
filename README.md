@@ -26,7 +26,7 @@ executable reads your own `PS3_GAME` folder at runtime.
 | `runtime/hle_gcm.cpp` | RSX FIFO front end (jumps/calls, semaphores, labels, reports, flips) |
 | `runtime/rsx_gl.cpp` | OpenGL 3.3 renderer: RSX vertex/fragment programs → GLSL, textures, blending |
 | `runtime/host_sdl.cpp` | SDL3 window, keyboard/gamepad input, audio output |
-| `runtime/host_null.cpp`, `rsx_null.cpp` | headless backend (used by the Linux build for now) |
+| `runtime/host_null.cpp`, `rsx_null.cpp` | optional headless backend |
 | `cmake/` | toolchains: Windows (llvm-mingw), Linux cross (zig) |
 | `third_party/` | SDL3 sources (not in git; download `SDL3-3.4.18` there) |
 
@@ -34,6 +34,7 @@ executable reads your own `PS3_GAME` folder at runtime.
 
 Requirements: Python 3, CMake, Ninja, llvm-mingw (Windows), zig (Linux cross build), SDL3 3.4.18
 sources in `third_party/SDL3-3.4.18`, the decrypted `EBOOT.elf` copied to `input/EBOOT.elf`.
+Native Linux builds need Clang and OpenGL development files; an installed SDL3 3.4 static library can replace the SDL3 sources.
 
 ```sh
 python tools/recomp.py                     # regenerate generated/*.cpp
@@ -41,6 +42,9 @@ cmake -S . -B build-win -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/windows-llvm-mingw
 cmake --build build-win -j 6
 cmake -S . -B build-linux -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/linux-zig.cmake
 cmake --build build-linux -j 6
+# Native Linux (SDL/OpenGL)
+cmake -S . -B build-native -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Release -DF1CE_HOST=SDL
+cmake --build build-native -j 6
 ```
 
 SPU code runs through translated C++ where available (`generated/spu/`, kept in the repository). To add blocks
@@ -61,6 +65,7 @@ Or use `build-win/f1ce_launcher.exe`: it sets the display and speed options belo
 `build-win/f1ce_launcher.ini` and starts the game from the folder above `build-win/`, without a console; its Advanced tab sets the Quick Race settings (`F1CE_QR_*` below).
 
 A 1280x720 window opens. Log in `f1ce_recomp.log`, saves in `ps3_data/` (both in the current folder).
+Shaders are cached in `shader_cache/` beside the executable.
 The console shows warnings and errors only; the log file has everything (`F1CE_LOG_CONSOLE=1` prints every line,
 which slows the game noticeably in Git Bash / the Windows console).
 
@@ -158,7 +163,8 @@ Keyboard: arrows = d-pad, **Z** = ✕, **X** = ◯, **A** = □, **S** = △, **
 - [x] Heavy rain at ~25 fps (untranslated SPU job, fixed 2026-11-03: ~38 fps on the grid)
 - [x] OpenGL crash (guest memory fault) after a cold shader compile (fixed 2026-11-04)
 - [ ] Save data beyond profiles (`cellSaveData*` callbacks for progress): deferred
-- [ ] SDL/OpenGL or Vulkan backend for the Linux build (also needed for a Steam Deck test)
+- [x] Native Linux SDL/OpenGL build
+- [ ] Linux Vulkan and Steam Deck tests
 - [x] Screen rain drops (smoothed by `F1CE_RAIN_SMOOTH`) and the suspension arms: the user judged both faithful to the
       original on 2026-11-04 (RPCS3 is brighter overall)
 - [ ] Car shake at the grid with `F1CE_60FPS` reported again on 2026-11-03 (the hold engaged in that log; track and
@@ -196,8 +202,8 @@ Steps 1-7 are done; 8 is in progress, 9-11 are next.
    open track. The grid is limited by the SPU work (~7.3 of the 6-core CPU's threads busy); the remaining large
    pieces are the job manager's policy module (~30% of SPU worker time) and the shadow passes
    (`RenderStaticShadows` and `RenderBlurredShadows` ~10% of a grid frame each, measured with `F1CE_SKIP_FN`).*
-9. **Linux backend and Steam Deck.** SDL window/input/audio and the Vulkan renderer in the Linux build (today it is
-   headless), then a test on a Deck. An 8-thread estimate on this PC (2026-10-31) gave 26-30 fps on the grid, so the
+9. **Linux Vulkan and Steam Deck.** Enable Vulkan on Linux, then test on a Deck.
+   An 8-thread estimate on this PC (2026-10-31) gave 26-30 fps on the grid, so the
    Deck needs less SPU work, not only a faster runtime.
 10. **Remaining visual differences.** Rubber marks not checked since 2026-10-28 (see below). *Screen rain drops and the
     suspension arms were judged faithful by the user on 2026-11-04.*

@@ -28,6 +28,7 @@ HOOKS = {0x3FB310: "camera_projection_hook",   # camera projection and frustum, 
          0x2F141C: "skip_2f141c_hook", 0x2F1BEC: "skip_2f1bec_hook", 0x43F620: "skip_43f620_hook",   # hle_skipfn.cpp
          0x43FFA0: "skip_43ffa0_hook", 0x30388C: "skip_30388c_hook"}
 SPIN_LOOPS = {0x551228, 0x5513BC}   # the job manager's waits: they only poll counters the SPUs write
+JOB_MANAGER_RANGE = (0x550000, 0x553000)   # ordinary counter stores race the SPU's full-line atomics
 
 LOAD_INT = {  # mnemonic: (size, signed, update, indexed)
     "lbz": (1, 0, 0, 0), "lbzu": (1, 0, 1, 0), "lbzx": (1, 0, 0, 1), "lbzux": (1, 0, 1, 1),
@@ -324,6 +325,8 @@ class FuncGen:
             ea = self.ea_x(w) if idx else self.ea_d(w, disp)
             fn = {1: "st8", 2: "st16", 4: "st32", 8: "st64"}[size]
             cast = {1: "u8", 2: "u16", 4: "u32", 8: "u64"}[size]
+            if JOB_MANAGER_RANGE[0] <= self.start < JOB_MANAGER_RANGE[1]:
+                return f"{{ u32 ea = {ea}; ppu_job_store(ea, ({cast}){r(s)}, {size});" + (f" c.r[{ra}] = ea;" if upd else "") + " }"
             return f"{{ u32 ea = {ea}; {fn}(ea, ({cast}){r(s)});" + (f" c.r[{ra}] = ea;" if upd else "") + " }"
         if m in LOAD_FP:
             size, upd, idx = LOAD_FP[m]
@@ -697,7 +700,10 @@ class Recompiler:
             chunk.append(FuncGen(self, s, e).generate())
             names.append((s, f"sub_{s:08X}"))
             if len(chunk) == CHUNK or i == len(self.bounds) - 1:
-                write(f"ppu_{n:03d}.cpp", '#include "ppu_funcs.h"\n\n' + "\n\n".join(chunk) + "\n")
+                prefix = '#include "ppu_funcs.h"\n\n'
+                if any("ppu_job_store(" in body for body in chunk):
+                    prefix += "void ppu_job_store(u32 ea, u64 value, u32 size);\n\n"
+                write(f"ppu_{n:03d}.cpp", prefix + "\n\n".join(chunk) + "\n")
                 chunk, n = [], n + 1
         stub_names = []
         for s, imp in sorted(self.stubs.items()):

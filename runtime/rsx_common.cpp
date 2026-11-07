@@ -9,6 +9,7 @@
 #include "kernel.h"
 
 #include <algorithm>
+#include <filesystem>
 #include <immintrin.h>
 #include <set>
 #include <sstream>
@@ -800,8 +801,14 @@ std::string shader_cache_dir() {
             size_t slash = s.find_last_of("\\/");
             if (slash != std::string::npos) d = s.substr(0, slash + 1) + "shader_cache";
         }
-        CreateDirectoryA(d.c_str(), nullptr);
+#else
+        std::error_code ec;
+        auto executable = std::filesystem::read_symlink("/proc/self/exe", ec);
+        if (!ec) d = (executable.parent_path() / "shader_cache").string();
 #endif
+        std::error_code create_error;
+        std::filesystem::create_directories(d, create_error);
+        if (create_error) LOG_E("shader cache directory '%s': %s", d.c_str(), create_error.message().c_str());
         return d;
     }();
     return dir;

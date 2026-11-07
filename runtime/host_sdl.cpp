@@ -22,6 +22,12 @@ std::condition_variable g_win_cv;
 SDL_Window* g_window = nullptr;
 bool g_window_failed = false;
 SDL_GLContext g_gl = nullptr;
+#ifndef _WIN32
+// GLX cannot bind the render window to another thread's context at the same time.
+// Background shader workers therefore need a drawable of their own.
+std::mutex g_gl_windows_mutex;
+std::vector<std::pair<SDL_GLContext, SDL_Window*>> g_gl_windows;
+#endif
 
 SDL_AudioStream* g_audio = nullptr;
 
@@ -314,14 +320,38 @@ bool gl_begin() {
 void* gl_proc(const char* name) { return (void*)SDL_GL_GetProcAddress(name); }
 void* gl_create_shared_context(bool share) {
     if (!g_window || !g_gl) return nullptr;
+    SDL_Window* window = g_window;
+#ifndef _WIN32
+    window = SDL_CreateWindow("F1CE shader compiler", 1, 1, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
+    if (!window) { LOG_W("shader compiler window: %s", SDL_GetError()); return nullptr; }
+#endif
     SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, share ? 1 : 0);
-    SDL_GLContext ctx = SDL_GL_CreateContext(g_window);   // becomes current: switch back
+    SDL_GLContext ctx = SDL_GL_CreateContext(window);   // becomes current: switch back
     SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 0);
     SDL_GL_MakeCurrent(g_window, g_gl);
     if (!ctx) LOG_W("shared GL context: %s", SDL_GetError());
+#ifndef _WIN32
+    if (!ctx) SDL_DestroyWindow(window);
+    else {
+        std::lock_guard lk(g_gl_windows_mutex);
+        g_gl_windows.emplace_back(ctx, window);
+    }
+#endif
     return ctx;
 }
-bool gl_make_current(void* ctx) { return SDL_GL_MakeCurrent(g_window, (SDL_GLContext)ctx); }
+bool gl_make_current(void* ctx) {
+    SDL_Window* window = g_window;
+#ifndef _WIN32
+    {
+        std::lock_guard lk(g_gl_windows_mutex);
+        for (const auto& [context, drawable] : g_gl_windows)
+            if (context == ctx) { window = drawable; break; }
+    }
+#endif
+    if (SDL_GL_MakeCurrent(window, (SDL_GLContext)ctx)) return true;
+    LOG_E("OpenGL context activation failed: %s", SDL_GetError());
+    return false;
+}
 void gl_swap() { if (g_window) SDL_GL_SwapWindow(g_window); }
 void gl_drawable_size(int* w, int* h) { SDL_GetWindowSizeInPixels(g_window, w, h); }
 

@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cstdarg>
+#include <set>
 #include <vector>
 
 #ifdef _WIN32
@@ -11,7 +12,6 @@
 #include <windows.h>
 #include <timeapi.h>
 #include <tlhelp32.h>
-#include <set>
 #else
 #include <signal.h>
 #include <sys/mman.h>
@@ -388,6 +388,30 @@ SpinLock& atomic_lock(u32 ea) { return g_atomic_locks[((ea >> 7) ^ (ea >> 17)) &
 static std::atomic<u32> g_line_gen[4096];
 u32 line_generation(u32 ea) { return g_line_gen[(ea >> 7) & 4095].load(std::memory_order_relaxed); }
 void line_written(u32 ea) { g_line_gen[(ea >> 7) & 4095].fetch_add(1, std::memory_order_relaxed); }
+
+// The job manager publishes/reset its counters with ordinary halfword stores. They must
+// share the reservation lock with the SPU's full-line PUTLLC: a value comparison alone
+// cannot stop a PPU store between that comparison and the following 128-byte copy.
+// Hash collisions only protect an extra line; HLE writers already hold their own lock.
+static std::atomic<u8> g_ppu_job_lines[4096];
+static u32 job_line_slot(u32 ea) { return ((ea >> 7) ^ (ea >> 17)) & 4095; }
+void ppu_track_job_control(u32 ea) { g_ppu_job_lines[job_line_slot(ea)].store(1, std::memory_order_relaxed); }
+void ppu_job_store(u32 ea, u64 value, u32 size) {
+    WATCH_STORE(ea, value, size);
+    u8 bytes[8];
+    for (u32 i = 0; i < size; i++) bytes[i] = (u8)(value >> ((size - i - 1) * 8));
+    for (u32 offset = 0; offset < size;) {
+        const u32 a = ea + offset, n = std::min(size - offset, 128 - (a & 127));
+        if (g_ppu_job_lines[job_line_slot(a)].load(std::memory_order_relaxed)) {
+            std::lock_guard lk(atomic_lock(a));
+            memcpy(gmem(a), bytes + offset, n);
+            line_written(a);
+        } else {
+            memcpy(gmem(a), bytes + offset, n);
+        }
+        offset += n;
+    }
+}
 
 u32 ppu_lwarx(PPUContext& c, u32 ea) {
     std::lock_guard lk(atomic_lock(ea));

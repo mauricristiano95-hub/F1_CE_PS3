@@ -19,6 +19,7 @@ u64 dma_count(int k);   // spu.cpp (profiling)
 void line_written(u32 ea);         // core.cpp: a write under the lock (fails SPU PUTLLCs on the line)
 void place_thread(int kind);   // core.cpp
 void profile_register_thread();   // core.cpp (host profiler)
+void ppu_track_job_control(u32 ea);   // core.cpp: serialize PPU counter stores with SPU atomics
 std::atomic<int> g_worker_wid[8] = {-1, -1, -1, -1, -1, -1, -1, -1};   // profiling (F1CE_PROFILE): workload each SPU worker runs
 
 namespace {
@@ -514,6 +515,7 @@ HLE_FUNC(cellSpursAddWorkload) {
     w.size = (u32)ARG(3);
     w.max_contention = std::clamp<u32>((u32)ARG(7), 1, std::max(1u, g_sp.nspus));
     w.arg = ARG(4);
+    ppu_track_job_control((u32)w.arg);
     st32((u32)ARG(1), wid);
     LOG_I("SPURS workload %u: pm=%08x size=%x arg=%016llx contention %llu..%llu", wid, w.pm, w.size,
           (unsigned long long)w.arg, (unsigned long long)ARG(6), (unsigned long long)ARG(7));

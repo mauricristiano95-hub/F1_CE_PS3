@@ -449,13 +449,14 @@ SYS(timer_usleep) {
     sleep_usec(ARG(0));
     // keep the PPU at most one ring slot (reference step 2) ahead of a lagging RSX: the main thread paces its frames
     // with usleep, and the game would otherwise rewrite a command list the RSX is still running (hle_gcm.cpp)
+    // Other guest threads can sleep while holding locks needed by main, so they must not wait on the RSX here.
     static const bool no_throttle = getenv("F1CE_NO_RSX_THROTTLE") != nullptr;   // debug
     {   // debug: F1CE_REFS_LOG samples the PPU/RSX distance
         static const bool rl = getenv("F1CE_REFS_LOG") != nullptr;
         static u32 calls = 0;
         if (rl && ++calls % 200 == 0) LOG_I("refs behind: %d", rsx_refs_behind());
     }
-    if (!no_throttle && rsx_refs_behind() > 2) {
+    if (!no_throttle && t_self && t_self->name == "main" && rsx_refs_behind() > 2) {
         u64 start = time_usec();
         // up to 15 s: at the race start the RSX can take seconds for the loading list (hundreds of textures)
         // (no limit while the renderer compiles its start-up shaders on the RSX thread)
