@@ -27,8 +27,10 @@ executable reads your own `PS3_GAME` folder at runtime.
 | `runtime/hle_gcm.cpp` | RSX FIFO front end (jumps/calls, semaphores, labels, reports, flips) |
 | `runtime/rsx_gl.cpp` | OpenGL 3.3 renderer: RSX vertex/fragment programs → GLSL, textures, blending |
 | `runtime/host_sdl.cpp` | SDL3 window, keyboard/gamepad input, audio output |
-| `runtime/host_null.cpp`, `rsx_null.cpp` | headless backend (used by the Linux build for now) |
-| `cmake/` | toolchains: Windows (llvm-mingw), Linux cross (zig) |
+| `runtime/host_null.cpp`, `rsx_null.cpp` | headless backend (`-DF1CE_HOST=NULL`) |
+| `cmake/` | toolchains: Windows (llvm-mingw), Linux cross (zig, with `pkg-config.cmd` for the sysroot) |
+| `linux/` | Linux packaging: `AppRun` (launcher), `make_appimage.py`, `build_from_windows.sh`, `build.sh` + `Dockerfile` (native build) |
+| `tools/linux_sysroot.py`, `tools/pkgconfig.py` | Linux headers/sonames for SDL's backends in the zig cross build, and a pkg-config for them |
 | `third_party/` | SDL3 sources (not in git; download `SDL3-3.4.18` there) |
 
 ## Build
@@ -40,15 +42,19 @@ sources in `third_party/SDL3-3.4.18`, the decrypted `EBOOT.elf` copied to `input
 python tools/recomp.py                     # regenerate generated/*.cpp
 cmake -S . -B build-win -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/windows-llvm-mingw.cmake
 cmake --build build-win -j 6
-cmake -S . -B build-linux -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/linux-zig.cmake
+python tools/linux_sysroot.py              # once: Linux headers for SDL's X11/audio/input backends
+cmake -S . -B build-linux -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/linux-zig.cmake -DF1CE_VULKAN=ON
 cmake --build build-linux -j 6
 ```
+
+The Linux steps and the AppImage are also one command, `sh linux/build_from_windows.sh` (see
+[Linux and Steam Deck](#linux-and-steam-deck)).
 
 SPU code runs through translated C++ where available (`generated/spu/`, kept in the repository). To add blocks
 the game executes that are not translated yet, run with `F1CE_SPU_DUMP_BLOCKS=<file>` and then
 `python -I tools/spu_aot.py <file>` (blocks already translated are kept), and rebuild.
 
-`F1CE_HOST` selects the platform backend (`SDL` default on Windows, `NULL` = headless).
+`F1CE_HOST` selects the platform backend (`SDL` default, `NULL` = headless).
 `-DF1CE_TRACE_PC=ON` (off by default since 2026-10-31) records the guest PC of memory accesses for crash reports and
 enables `F1CE_WATCH_LINE` on PPU stores; without it crash reports give the function and LR only.
 
@@ -67,6 +73,48 @@ which slows the game noticeably in Git Bash / the Windows console).
 
 Keyboard: arrows = d-pad, **Z** = ✕, **X** = ◯, **A** = □, **S** = △, **Q/W** = L1/R1, **1/2** = L2/R2,
 **Enter** = Start, **Backspace** = Select. Gamepads are supported through SDL.
+
+## Linux and Steam Deck
+
+Built, packaged and checked on Windows, **not run on Linux yet** (no Linux machine here).
+
+**Building** (on Windows, Git Bash): `sh linux/build_from_windows.sh` makes `out/F1CE-x86_64.AppImage` and
+`out/F1CE-x86_64.tar.gz` (the same AppImage with its executable bit, which most copies from Windows lose). Steps:
+`tools/linux_sysroot.py` the first time (Debian 10 headers, `.pc` files and shared objects of X11, xcb, PulseAudio, ALSA,
+libudev and D-Bus, checked against the archive's package index, into `third_party/linux-sysroot`), the zig cross build
+in `build-linux/`, then `linux/make_appimage.py`. The executable needs only glibc 2.28 or newer (libc++ is linked in);
+SDL loads X11, PulseAudio/ALSA, libudev, D-Bus, OpenGL and Vulkan at run time. This build has no native Wayland
+(SDL makes its protocol code with `wayland-scanner`, a Linux program): it runs through XWayland on Wayland desktops and
+in the Deck's game mode. On Linux, `linux/build.sh` (`--deps` prints the packages to install) or the container in
+`linux/Dockerfile` builds with the system compiler and adds Wayland and PipeWire; that AppImage needs the build
+machine's glibc or newer (Debian 12 image: 2.36).
+
+`make_appimage.py` writes the SquashFS image itself (zlib, no fragments; checked by reading it back with an independent
+reader) behind the AppImage type 2 runtime (downloaded once into `third_party/appimage-runtime`), strips the executable
+(238 -> 40 MB; `build-linux/f1ce` keeps its debug information) and adds `build-win/shader_cache/programs.bin` if it
+exists, so the first start translates every program the game has used up front (progress bar) instead of during play.
+The AppImage holds code generated from the game's executable: it is for your own use, not for distribution.
+
+**Running:** make the AppImage executable (`chmod +x`, or unpack the `.tar.gz`) and start it. The first time it looks
+for `PS3_GAME` next to the AppImage (also one folder down), in `~/Games/F1CE/` and on SD cards (`/run/media/*/*/F1CE/`),
+else asks for the folder (zenity or kdialog). It needs `USRDIR/EBOOT.elf`, the decrypted executable, as on Windows.
+
+| | |
+|---|---|
+| `--settings` | settings dialog (zenity: renderer, resolution, full screen, vsync, MSAA, FXAA, 60 fps mode and cap, vibration, intro skip, language), then start; also the desktop entry's "Settings" action |
+| `--game-dir <dir>`, `--reset`, `--where`, `--trace` | set the game folder / forget all settings / print the paths below / passed to the game |
+| `~/.config/f1ce-recomp/settings.conf` | `F1CE_GAME_DIR` and any `F1CE_*` variable of this README, one `NAME=value` per line; variables set in the environment win (Steam launch options `F1CE_SCALE=2 %command%`) |
+| `~/.local/share/f1ce-recomp/` | working folder: `ps3_data/` (saves), `f1ce_recomp.log` |
+| `~/.cache/f1ce-recomp/shader_cache/` | shader cache (`F1CE_CACHE_DIR`; on Windows it stays next to the executable) |
+
+**Steam Deck:** copy the AppImage (or unpack the `.tar.gz`) and `PS3_GAME` into one folder, e.g. `~/Games/F1CE/`, in
+desktop mode; run it once there to pick the game folder and look at the settings; then Steam -> "Add a Non-Steam Game"
+-> the AppImage, and start it in game mode. Steam Input gives the game an Xbox-style pad (✕ = A, ◯ = B, □ = X,
+△ = Y); the default "Gamepad" layout fits. On a Deck (DMI board vendor Valve, product Jupiter/Galileo) unset options
+default to Vulkan, 1280x800 and full screen; under gamescope the launcher also selects SDL's X11 driver. It keeps the
+original 30 fps mode: 60 fps mode with a 30 fps cap paced better in the 6-CPU estimate (2026-11-06) but can freeze
+(cube map skip, see the 2026-11-07 log). Choices made in the dialog are stored explicitly (`opengl`, `1`, `0`), so they
+are kept on a Deck too.
 
 ### Debugging aids
 
@@ -109,9 +157,12 @@ Keyboard: arrows = d-pad, **Z** = ✕, **X** = ◯, **A** = □, **S** = △, **
 | `F1CE_THREAD_CPU=1` | with the `cpu:` line every 5 s: the cores each thread used (threads are named) |
 | `F1CE_TICKS_FIXED=1` | with `F1CE_60FPS`: exactly one tick per frame whatever the time (with frame dumps, to see per-tick motion) |
 | `F1CE_USLEEP_LOG=1` | `sys_timer_usleep` requests per second by size, and the callers of short ones |
-| `F1CE_PIN=0/1` | thread placement with 12+ logical processors (Windows). Default: the renderer has a core of its own. 0: all threads left to the system; 1: the main PPU thread gets a core too |
+| `F1CE_PIN=0/1` | thread placement with 12+ logical processors (Windows). Default: the renderer prefers a core of its own (ideal processor, not a hard pin: pinned, it was sometimes held off for 10-30 ms and frames missed their vblank). 0: all threads left to the system; 1: the main PPU thread gets a core too |
+| `F1CE_CACHE_DIR=<dir>` | shader cache folder instead of `shader_cache/` next to the executable (set by the Linux launcher: the AppImage is read-only) |
+| `F1CE_NO_LOG=1` | no `f1ce_recomp.log` (launcher: "No log file"); info lines are dropped before formatting, warnings and errors still go to the console |
 | `F1CE_PM_NATIVE=0` | runs the job manager policy module's functions as SPU code instead of their native versions (`runtime/spu_pm.cpp`) |
 | `F1CE_PM_CHECK=1/2` | every 64th call (2: every call) of each native job manager function also runs on two copies of the SPU, interpreter against native (DMA puts only logged), and logs differences in local store, registers, MFC state and DMA commands (`pm check` lines) |
+| `F1CE_JOBLIST_LOG=1` | traces how the frame job lists (w1/w2, queues 0x10C15100/0x10C29100) and the w0 queue are built (`runtime/hle_joblist.cpp`, `PROBES` in `tools/recomp.py`): PPU reserves, SPU entry writes with the writer's job, w0 grabs/ends, the frame end's waits and compaction; logs jobs written behind a queue's head, and when the watchdog sees the same job list wait twice it prints the cycles under way (`joblist:` lines). `F1CE_JOBLIST_DUMP_AT=<s>` also prints the first three cycles after that many seconds |
 | `F1CE_SPU_NOFASTCULL=1` | runs the geometry job's vertex transform and triangle cull as translated, not the native versions (`spu_fast_*` in `runtime/spu_ops.h`) |
 | `F1CE_SPU_CULL_CHECK=1/2` | every 64th transform and cull also runs on two copies of the SPU, interpreter against native, and logs differences; 2 puts NaN, infinities and huge values into the copies' input |
 | `SPU_AOT_HEAT=1 python -I tools/spu_aot.py` | builds counters per SPU block; the game writes `spu_heat.txt` every 10 s (regenerate without it afterwards) |
@@ -157,7 +208,8 @@ Keyboard: arrows = d-pad, **Z** = ✕, **X** = ◯, **A** = □, **S** = △, **
 - [x] RSX: FIFO front end and OpenGL renderer; the 2D frontend renders at ~58 fps
 - [x] Vulkan renderer (`F1CE_RENDERER=vulkan`), on par with OpenGL; played by hand with no crashes reported
 - [x] SDL3 window, keyboard/gamepad input, audio output (Windows)
-- [x] Linux x86-64 cross build (headless backend; not tested, no Linux environment available)
+- [x] Linux x86-64 cross build with SDL3 (X11, PulseAudio/ALSA, gamepads) and both renderers, AppImage with a launcher
+      for desktops and the Steam Deck (2026-11-07; built and packaged on Windows, not run on Linux yet)
 - [x] 3D scene of the profile screen: lighting, shadow maps, fog, post-processing chain
 - [x] Profile creation (save data), Single Player menu, Quick Race at Silverstone: the race renders
 - [x] SPURS tasksets: tasks run on SPU interpreters; event flags and queues shared with the SPU side
@@ -172,7 +224,7 @@ Keyboard: arrows = d-pad, **Z** = ✕, **X** = ◯, **A** = □, **S** = △, **
 - [x] Heavy rain at ~25 fps (untranslated SPU job, fixed 2026-11-03: ~38 fps on the grid)
 - [x] OpenGL crash (guest memory fault) after a cold shader compile (fixed 2026-11-04)
 - [ ] Save data beyond profiles (`cellSaveData*` callbacks for progress): deferred
-- [ ] SDL/OpenGL or Vulkan backend for the Linux build (also needed for a Steam Deck test)
+- [ ] First run on Linux and on a Steam Deck
 - [x] Screen rain drops (smoothed by `F1CE_RAIN_SMOOTH`) and the suspension arms: the user judged both faithful to the
       original on 2026-11-04 (RPCS3 is brighter overall)
 - [x] Car shake at the grid with `F1CE_60FPS` (the game's own wheel-spin swing, also on the original): drawn filtered,
@@ -211,8 +263,9 @@ Steps 1-7 are done; 8 is in progress, 9-11 are next.
    waits for particular jobs (the main thread's job waits), not for SPU time in total: skipping the shadow passes frees
    ~20% of SPU time and gains nothing. Less SPU work still matters on weaker CPUs (step 9). Shadow passes keep running
    every frame (any other rate breaks them visually).*
-9. **Linux backend and Steam Deck.** SDL window/input/audio and the Vulkan renderer in the Linux build (today it is
-   headless), then a test on a Deck. An 8-thread estimate on this PC (2026-10-31) gave 26-30 fps on the grid, so the
+9. **Linux backend and Steam Deck.** *Built 2026-11-07: SDL window/input/audio and both renderers in the Linux build,
+   an AppImage with a launcher (see [Linux and Steam Deck](#linux-and-steam-deck)); not run on Linux yet.* Next: a test on
+   a Linux PC and on a Deck. An 8-thread estimate on this PC (2026-10-31) gave 26-30 fps on the grid, so the
    Deck needs less SPU work, not only a faster runtime.
 10. **Remaining visual differences.** Rubber marks not checked since 2026-10-28 (see below). *Screen rain drops and the
     suspension arms were judged faithful by the user on 2026-11-04.*
@@ -1057,3 +1110,84 @@ banks, then waits for SPU work.
   builds it when the pass is skipped, or not skip it.
   - Other 60 fps problems reported by the user (not investigated): shadows flashing at random, pit stop animations wrong,
     odd audio (sounds as if the audio buffer were tied to the frame rate).
+- **Interlagos race freeze: job list race, fixed (2026-11-07):** two test users froze at Interlagos minutes into a race
+  (Vulkan, NVIDIA; one in 30 fps mode with no cube map skips, so the cube skip above was not the cause there). Same
+  signature as the Time Trial freeze: main in fn 0x5513B8 waiting for the end of a frame list, three in-order jobs of
+  binary 0x100A1280 spinning at 0x90e8-0x96e8 because a long run of skip entries sits before them.
+  - Reproduced here by toggling pause every 3 s during an Interlagos race (paused frames have almost no game update, so
+    main ends one frame and starts building the next within microseconds): froze in 5 of 7 runs of ~6 min, also with
+    `F1CE_PM_NATIVE=0`. Script pattern: `F1CE_QR_TRACK=brazil`, throttle held, `START` every 3 s from 75 s.
+  - How the frame lists work: all jobs carry pre-assigned, increasing RSX command offsets (descriptor +0x4C) and the
+    in-order ones (+0x30 = `01000200`) chain through the lock line 0x10414E80 (+0x30: next in-order index, command
+    offset) and the per-SPU done windows at 0x10414F00 (base + 96-bit mask; an in-order job runs only within 95 entries of
+    the first unfinished one; skip entries never finish). Main (fn 0x43A11C from 0x43B0A8) reserves ranges of skip
+    entries (fn 0x48A948 -> 0x5515D0) and pushes a w0 writer job for each; the w0 jobs write the real jobs into the
+    reserves (plain jobs in fixed groups, the last group always flush against the in-order reserve; in-order jobs at the
+    lock's next index). At frame end main waits for w0 (fn 0x489C90 -> 0x55127C), waits for the previous list (0x5513B8)
+    and resets it (0x55221C), compacts the current list in place (fn 0x48AC34: non-skip entries to the front, the rest
+    skips) and kicks it.
+  - Causes found with the new trace (`F1CE_JOBLIST_LOG`): (1) the SPURS scheduler's rule 2 (join a workload busy for
+    > 1 ms) also admitted SPUs into a finished frame list whose ready count the job manager had cleared; such a PM took
+    the next frame's reserve (2820 skip entries) while main was still building it, the writers then wrote the jobs behind
+    the queue head (logged as `behind its head`) and the frame lost them; (2) the job manager's per-SPU halfwords, which
+    the PPU waits read, briefly omit a job the grab took before it is in a PM slot, and the last PM of a list can still
+    take entries between releasing its halfword and leaving: main's wait could return early, and in one capture main
+    compacted a list 0.3 ms before a w0 job appended its last in-order jobs (they landed behind thousands of skips).
+  - Fix: rule 2 only joins workloads that still signal work (ready count > 0; `F1CE_SPURS_JOIN_IDLE=1` = old rule);
+    the native grab lists taken jobs until they ended and left their PM slot (`runtime/spu_pm.cpp`, g_taken), and
+    probes at the returns of the PPU job waits (0x551278, 0x551354, 0x55140C) also wait for those, plus, after the
+    waits for a whole frame list (0x5513B8) and for w0 (0x55127C), for the queue's job managers to leave the workload
+    (bounded to 20 ms; `job waits:` line every 5 s when it waited, `job wait long:` for waits over 2 ms). The taken-jobs
+    part needs the native PM (`F1CE_PM_NATIVE=0` keeps only the scheduler rule and the workload exit wait).
+  - Result: pause repro 0 freezes in 12 runs (8 at 30 fps, 4 at 60 fps, ~6 min each); the same exe with
+    `F1CE_SPURS_JOIN_IDLE=1` froze again; without the w0 exit wait 1 of 4 runs froze (compaction race). Grid A/B
+    against the previous build (3 pairs, 60 fps mode): 45.5 vs 45.5 fps, 1% low ~39 both; 150 s Interlagos drive at
+    30 fps: 1% low 18.9 before, 19.6 after. Normal racing: extra waits at most ~60 us (about 0.1 ms per second); while
+    toggling pause, 1-19 waits over 2 ms per 6 min (median 3.3 ms, at most 20 ms: a job manager still inside the
+    workload, likely a host thread that lost its time slice).
+  - The Time Trial freeze above has the same shape (in-order jobs, a reserve of skips, more in-order jobs) and was
+    probably the same race; the cube map skip only changed the timing (not retested).
+  - Lessons: a host scheduler heuristic that lets an SPU into a workload the game did not signal breaks producer/consumer
+    protocols that rely on the ready count; capture the freeze cycle, not the first job wait (the watchdog dump now fires
+    on the same wait twice in a row); a deadlock that leaves the RSX replaying the last frame still shows "fps".
+- **Linux build and AppImage (2026-11-07):**
+  - The Linux build now uses the SDL host with the OpenGL and Vulkan renderers (it was headless). Runtime changes: GL
+    1.0/1.1 entry points come from the loader outside Windows (`GL_FUNCS_1X` in `rsx_gl.cpp`: nothing links libGL),
+    `F1CE_CACHE_DIR` and a portable shader cache folder (`/proc/self/exe` on Linux), thread names
+    (`pthread_setname_np`), `F1CE_CPUS` (`sched_setaffinity`), raised priority for the critical-path threads through
+    `setpriority` (usually refused without `CAP_SYS_NICE`: then logged once, all threads equal), SDL app metadata (app
+    id `f1ce-recomp` for the window class and the audio stream), missing includes. Windows behaviour unchanged.
+  - Cross build: SDL needs its backends' headers and the sonames it later loads. `tools/linux_sysroot.py` takes them
+    from Debian 10 packages (glibc 2.28, the zig target); `tools/pkgconfig.py` answers SDL's pkg-config queries from the
+    sysroot (PulseAudio, D-Bus). The sysroot holds copies instead of symbolic links (no symlink privilege on Windows),
+    which made SDL load the development names (`libX11.so`, missing on systems without -dev packages): the toolchain
+    file points SDL's `<NAME>_LIB` entries at the versioned files, so it loads `libX11.so.6`, `libpulse.so.0`,
+    `libasound.so.2`, `libudev.so.1`. zig cannot emit SDL's precompiled header (`CMAKE_DISABLE_PRECOMPILE_HEADERS`).
+    SDL backends: video x11 (dynamic), audio pulseaudio and alsa (dynamic), libudev, D-Bus; no Wayland.
+  - Result: `build-linux/f1ce` needs libc, libm, libpthread, libdl and ld-linux only, symbol versions up to GLIBC_2.27.
+  - `linux/make_appimage.py`: SquashFS 4.0 writer (zlib, no fragments, 128 KiB blocks) verified with PySquashfsImage
+    on a 746-file test tree (directories over 256 entries, multi-block files) and on the AppImage itself (image at the
+    runtime's ELF end, contents byte-identical). 15.8 MB.
+  - `linux/AppRun`: game folder detection and picker, zenity settings dialog, Steam Deck defaults, XDG folders; tested
+    with dash on fake folders and a fake zenity (first run, settings round trip, environment over file, Deck defaults
+    in game mode, dialog choices over Deck defaults).
+- **Audio workload print hang (2026-11-08):**
+  - User report: music stopped in the menus, then the Time Trial loading screen froze. Watchdog: SPURS wkl 4 (audio)
+    parked on spu4 at pc 0x160b8 since its 356th run; Audio_Thread in `sys_lwmutex_lock` (10cef478) owned by main, main
+    in `sys_cond_wait` (0x86000009) under fn 0x5e217c.
+  - The audio job printed through `sys_spu_thread_send_event` (port 15, data1 = LS 0x3fdb0, saved registers): the
+    routine (`wrch OutMbox; wrch OutIntrMbox; rdch InMbox; ...; rdch InMbox`, found in guest memory at 0x1006132c and
+    copies) waits for a second word from the PPU-side print handler. 0x160b8 is that second read. Tasks already got the
+    completion (`event_needs_completion`, TerrainCollider); workload SPUs did not. The same hang is in an old run
+    (dbg/opt_d7, 5 s in). Fix: workload SPUs complete the second read too (reset each run); `spurs_send_event` logs the
+    printed text for tasks and workloads (`print:` in the send_event line).
+- **Line wait slots leaked on thread exit (2026-11-08):**
+  - User crash loading a career Grand Prix after a long session (similar ones entering the driver preview):
+    `FATAL: line_wait: more than 16 waiting threads` in a new 'AsyncRender' thread. Each host thread that ever did a
+    line wait (gcm label/flip waits, job manager waits) took one of 16 slots for good; the game starts a new
+    AsyncRender thread for every loading screen, so the 10th one (plus main, SPU workers, renderer, ...) found none.
+  - Fix: slots are a bitmask pool; `line_wait_thread_exit()` (PPU thread exit) clears the slot's lines, its waiter
+    count and returns it. Smoke test (menus into a quick race, 5 AsyncRender threads) clean.
+  - Not related: a tester's crash at the first race load on Vulkan / Intel UHD Graphics
+    (`TEST_LOGS/f1ce_recomp_crash_on_racestart.log`, 70 s, 6 AsyncRender threads) is `vkWaitSemaphores` timing out
+    after 5 s (VK_TIMEOUT) on a submitted serial: the GPU did not finish the first race frames. Open; OpenGL advised.

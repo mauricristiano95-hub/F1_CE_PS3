@@ -26,17 +26,32 @@ struct IdxRegion {
 };
 std::unordered_map<u64, IdxRegion> g_idx_regions;
 
-void evict_index_caches() {
-    for (auto it = g_idx_regions.begin(); it != g_idx_regions.end();)
-        if (g_frame - it->second.last_frame > 120) {
-            heap_free(g_iheap, it->second.off, it->second.bytes);
-            it = g_idx_regions.erase(it);
-        } else ++it;
-    for (auto it = g_idx_cache.begin(); it != g_idx_cache.end();)
-        if (g_frame - it->second.last_frame > 120) {
-            heap_free(g_iheap, it->second.off, it->second.bytes);
-            it = g_idx_cache.erase(it);
-        } else ++it;
+// drops entries not drawn for 120 frames from 1/slices of the map's buckets (cursor: the next bucket). The race keeps
+// 50-120k index lists: one pass over all of them took 7-15 ms, so a frame missed its vblank every 2 s; called every
+// frame with 60 slices, each entry is still looked at once every 60 frames. (erase never rehashes, so the buckets hold
+// still during a slice; a rehash between frames only moves the cursor's place)
+template <class Map> void evict_slice(Map& m, size_t& cursor, u32 slices) {
+    const size_t nb = m.bucket_count();
+    if (!nb || m.empty()) return;
+    const size_t per = slices <= 1 ? nb : nb / slices + 1;
+    static std::vector<u64> dead;
+    dead.clear();
+    for (size_t i = 0; i < per && i < nb; i++) {
+        const size_t b = (cursor + i) % nb;
+        for (auto it = m.begin(b); it != m.end(b); ++it)
+            if (g_frame - it->second.last_frame > 120) dead.push_back(it->first);
+    }
+    cursor = (cursor + per) % nb;
+    for (u64 k : dead) {
+        auto it = m.find(k);
+        heap_free(g_iheap, it->second.off, it->second.bytes);
+        m.erase(it);
+    }
+}
+void evict_index_caches(u32 slices) {
+    static size_t regions_cursor = 0, lists_cursor = 0;
+    evict_slice(g_idx_regions, regions_cursor, slices);
+    evict_slice(g_idx_cache, lists_cursor, slices);
 }
 
 // Raw vertex data per buffer region (vertex pulling): as RegionEntry, but the guest bytes are copied unconverted

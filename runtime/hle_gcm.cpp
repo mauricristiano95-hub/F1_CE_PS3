@@ -16,6 +16,7 @@
 void set_thread_name(const char* name);   // core.cpp
 
 namespace rsx { u64 g_last_frame_draws = 0; }
+std::string profile_main_between(u64 t0, u64 t1);   // core.cpp
 bool shake_filter_on();   // hle_physics.cpp
 void log_thread_cpu();    // core.cpp
 u64 g_rsx_idle_us = 0;   // profiling: time the FIFO reader waited for the PPU (read by rsx_gl.cpp)
@@ -59,7 +60,7 @@ std::pair<u32, u32> g_hist[32];
 u32 g_hist_pos = 0;
 
 // recent semaphore operations: (kind 'A'cquire / 'R'elease, address, value, wait us, get)
-struct SemRec { char kind; u32 addr, val, wait_us, get, before; };
+struct SemRec { char kind; u32 addr, val, wait_us, get, before; u64 t = 0; };
 SemRec g_sem_hist[16];
 u32 g_sem_pos = 0;
 // recent flow commands: (time ms, get, command, put, reference)
@@ -141,6 +142,10 @@ struct Rsx {
 } rsx_state;
 
 u32 label_ptr(u32 offset) { return g.label_addr + offset; }
+// the label a SEMAPHORE_ACQUIRE waits on (0: none). Plain PPU stores do not wake line waits, and the RSX's 1 ms timeout
+// sometimes took 10-30 ms on its pinned processor: the vblank handler's release of the flip label then came a vblank
+// late every 0.25-0.5 s (1% low ~16 fps at 30). So the interrupt thread wakes this line after each handler.
+std::atomic<u32> g_rsx_acquire_ea{0};
 
 // the player's front wheel in the world, in a 3D scene: the swing of pace_ticks shows here, and only a stopped car has it. Frames of
 // two ticks hide the swing (the wheel reads the same each time), so once on, this holds until the car really moves or the scene ends.
@@ -271,9 +276,72 @@ void log_cpu_use() {
     window = now; last_cpu = cpu; flips = 0;
 }
 
+// frame pacing over 5 s: median / 99th percentile / worst flip interval ("1% low" = 1000 / p99), and for each frame over
+// 45 ms what the renderer thread spent it on (semaphore waits = waiting for the game, flip = present + GPU)
+void log_frame_pacing(u64 flip_us) {
+    static u64 last = 0, window = 0, sem_last = 0, flip_last = 0;
+    static std::vector<u32> iv;
+    static int slow_logged = 0;
+    static const bool prof = getenv("F1CE_PROFILE") != nullptr;   // + what the main thread did (core.cpp)
+    const u64 now = time_usec();
+    const u64 sem = rsx::g_fe.t_sem, fl = rsx::g_fe.t_flip;
+    const u64 dsem = sem >= sem_last ? sem - sem_last : sem, dfl = fl >= flip_last ? fl - flip_last : fl;
+    sem_last = sem; flip_last = fl;
+    if (last) {
+        const u32 d = (u32)(now - last);
+        iv.push_back(d);
+        if (d > 45000 && slow_logged < 400) {
+            slow_logged++;
+            LOG_I("pacing: slow frame %.1f ms at %.2f s | renderer: semaphore waits %.1f ms, flip %.1f ms, this flip %.1f ms, %u draws",
+                  d / 1e3, now / 1e6, dsem / 1e3, dfl / 1e3, flip_us / 1e3, (u32)rsx::g_last_frame_draws);
+            if (prof) {
+                LOG_I("pacing:   main thread %s", profile_main_between(last, now).c_str());
+                std::string sl;
+                const u64 end = g_main_sleep_pos.load();
+                for (u64 i = end > 256 ? end - 256 : 0; i < end; i++) {
+                    const MainSleep& s = g_main_sleeps[i % 256];
+                    if (s.t < last || s.t > now) continue;
+                    char b[64];
+                    snprintf(b, sizeof(b), " +%.1f lr=%08x %u->%u", (s.t - last) / 1e3, s.lr, s.req, s.took);
+                    sl += b;
+                }
+                LOG_I("pacing:   main sleeps (ms into frame, lr, us asked->taken):%s", sl.c_str());
+                std::string sm;
+                for (u32 i = 0; i < 16; i++) {
+                    const SemRec& r = g_sem_hist[(g_sem_pos + i) % 16];
+                    if (r.kind != 'A' || r.wait_us < 2000) continue;
+                    char b[64];
+                    snprintf(b, sizeof(b), " @%08x=%08x %.3f+%.1f ms", r.addr, r.val, r.t / 1e6, r.wait_us / 1e3);
+                    sm += b;
+                }
+                static u64 vb_last = 0;
+                LOG_I("pacing:   frame %.3f..%.3f s, vblanks %llu, long acquires:%s", last / 1e6, now / 1e6,
+                      (unsigned long long)(g.vblank_count - vb_last), sm.c_str());
+                vb_last = g.vblank_count;
+            }
+        } else if (prof && slow_logged < 400 && d < 36000 && (iv.size() % 50) == 0) {
+            LOG_I("pacing:   normal frame %.1f ms, main thread %s", d / 1e3, profile_main_between(last, now).c_str());
+        }
+    } else window = now;
+    last = now;
+    if (now - window >= 5000000 && iv.size() > 10) {
+        std::vector<u32> s = iv;
+        std::sort(s.begin(), s.end());
+        auto pct = [&](double p) { return s[std::min(s.size() - 1, (size_t)(p * s.size()))] / 1e3; };
+        u32 over40 = 0, over60 = 0;
+        for (u32 d : s) { over40 += d > 40000; over60 += d > 60000; }
+        LOG_I("pacing: %zu frames, ms p50 %.1f p90 %.1f p99 %.1f max %.1f | 1%% low %.1f fps | >40 ms %u, >60 ms %u",
+              s.size(), pct(0.5), pct(0.9), pct(0.99), s.back() / 1e3, 1000.0 / pct(0.99), over40, over60);
+        iv.clear();
+        window = now;
+    }
+}
+
 void do_flip(u32 id) {
     const DisplayBuffer& b = g.buffers[id & 7];
+    const u64 t0 = time_usec();
     rsx::flip(mem::RSX_LOCAL + b.offset, b.pitch, b.width, b.height);
+    log_frame_pacing(time_usec() - t0);
     if (g_ticks_per_frame_ea) pace_ticks();
     log_cpu_use();
     g.flip_status = 0;
@@ -319,6 +387,7 @@ void exec_method(u32 method, u32 arg) {
             static const bool old_spin = getenv("F1CE_SPIN_WAIT") != nullptr;
             static u64 woken = 0, timeouts = 0, window = 0;
             LineWait lw;
+            g_rsx_acquire_ea.store(a, std::memory_order_seq_cst);
             while (ld32(a) != arg) {
                 const u64 now = time_usec();
                 if (now - start > 5000000) {
@@ -331,13 +400,14 @@ void exec_method(u32 method, u32 arg) {
                 (line_wait_block(lw, 1) ? woken : timeouts)++;
             }
             line_wait_release(lw);
+            g_rsx_acquire_ea.store(0, std::memory_order_relaxed);
             if (!window) window = start;
             if (start - window > 5000000) {
                 LOG_I("RSX: semaphore waits woken by a write %.0f/s, by the 1 ms timeout %.0f/s (last %08x)", woken / 5.0, timeouts / 5.0, a);
                 woken = timeouts = 0;
                 window = start;
             }
-            g_sem_hist[g_sem_pos++ % 16] = {'A', a, arg, (u32)(time_usec() - start), g_cur_get, before};
+            g_sem_hist[g_sem_pos++ % 16] = {'A', a, arg, (u32)(time_usec() - start), g_cur_get, before, start};
             rsx::g_fe.t_sem += time_usec() - start;
             break;
         }
@@ -934,6 +1004,8 @@ HLE_FUNC(_cellGcmInitBody) {
                 g.intr_queue.erase(g.intr_queue.begin());
             }
             guest_call(c, job.first, {job.second});
+            std::atomic_thread_fence(std::memory_order_seq_cst);   // (the handler's plain stores before the check)
+            if (const u32 ea = g_rsx_acquire_ea.load(std::memory_order_seq_cst)) guest_written(ea, 4);
         }
     });
     g.init = true;

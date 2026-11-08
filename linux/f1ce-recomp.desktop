@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=F1 Championship Edition
+GenericName=Racing game (PS3, recompiled)
+Comment=Formula One: Championship Edition, statically recompiled from the PS3
+Exec=AppRun %U
+Icon=f1ce-recomp
+Terminal=false
+Categories=Game;
+StartupWMClass=f1ce-recomp
+Actions=Settings;
+
+[Desktop Action Settings]
+Name=Settings
+Exec=AppRun --settings

@@ -1,8 +1,12 @@
 // Guest memory, dispatch tables, threads, logging and other host services.
 #include "kernel.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdarg>
+#include <map>
+#include <set>
+#include <string>
 #include <vector>
 
 #ifdef _WIN32
@@ -12,13 +16,12 @@
 #include <timeapi.h>
 #include <synchapi.h>
 #include <tlhelp32.h>
-#include <algorithm>
-#include <map>
-#include <set>
-#include <string>
 #else
+#include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <unistd.h>
 #include <linux/futex.h>
 #include <sys/syscall.h>
@@ -52,6 +55,9 @@ static FILE* g_log_file = nullptr;
 
 void log_msg(LogLevel lv, const char* fmt, ...) {
     if (lv == LogLevel::trace && !g_log_trace) return;
+    // F1CE_NO_LOG: no f1ce_recomp.log; info lines are dropped before formatting, warnings and errors still go to the console
+    static const bool no_log = getenv("F1CE_NO_LOG") != nullptr;
+    if (no_log && lv < LogLevel::warn) return;
     char buf[2048];
     va_list ap;
     va_start(ap, fmt);
@@ -59,7 +65,7 @@ void log_msg(LogLevel lv, const char* fmt, ...) {
     va_end(ap);
     static const char* tags[] = {"T", "I", "W", "E"};
     std::lock_guard lk(g_log_mutex);
-    if (!g_log_file) {
+    if (!g_log_file && !no_log) {
         g_log_file = fopen("f1ce_recomp.log", "w");
         if (g_log_file) setvbuf(g_log_file, nullptr, _IOFBF, 1 << 20);
     }
@@ -148,7 +154,8 @@ struct alignas(64) LineSlot {
     std::atomic<u32> sleeping{0};
 };
 LineSlot g_line_slots[16];
-std::atomic<u32> g_line_slots_used{0};
+std::atomic<u32> g_line_slots_used{0};   // high-water mark: guest_written_slow scans slots below it
+std::atomic<u32> g_line_slots_taken{0};  // bit per slot owned by a live thread
 void futex_wait(std::atomic<u32>* a, u32 expected, u32 timeout_ms) {
 #ifdef _WIN32
     WaitOnAddress((volatile void*)a, &expected, sizeof(u32), timeout_ms);
@@ -182,10 +189,17 @@ void guest_written_slow(u32 ea, u32 size) {
 
 thread_local int t_line_slot = -1;
 thread_local bool t_line_registered = false;
+// Slots go back to the pool when their PPU thread exits (line_wait_thread_exit): the game starts a new 'AsyncRender'
+// thread for every loading screen, and slots that were never returned ran out after ~10 loads (fatal on a GP load).
 LineSlot& my_line_slot() {
     if (t_line_slot < 0) {
-        t_line_slot = (int)g_line_slots_used.fetch_add(1);
-        if (t_line_slot >= 16) fatal("line_wait: more than 16 waiting threads");
+        u32 taken = g_line_slots_taken.load(std::memory_order_relaxed);
+        do {
+            if (taken == 0xFFFF) fatal("line_wait: more than 16 waiting threads");
+            t_line_slot = __builtin_ctz(~taken);
+        } while (!g_line_slots_taken.compare_exchange_weak(taken, taken | 1u << t_line_slot));
+        u32 used = g_line_slots_used.load(std::memory_order_relaxed);
+        while ((u32)t_line_slot >= used && !g_line_slots_used.compare_exchange_weak(used, t_line_slot + 1)) {}
     }
     return g_line_slots[t_line_slot];
 }
@@ -227,6 +241,16 @@ void line_wait_release(LineWait& w) {
     s.line1.store(~0u, std::memory_order_relaxed);
     g_line_waiters.fetch_sub(1, std::memory_order_seq_cst);
     t_line_registered = false;
+}
+
+void line_wait_thread_exit() {
+    if (t_line_slot < 0) return;
+    LineSlot& s = g_line_slots[t_line_slot];
+    s.line0.store(~0u, std::memory_order_relaxed);
+    s.line1.store(~0u, std::memory_order_relaxed);
+    if (t_line_registered) { g_line_waiters.fetch_sub(1, std::memory_order_seq_cst); t_line_registered = false; }
+    g_line_slots_taken.fetch_and(~(1u << t_line_slot), std::memory_order_release);
+    t_line_slot = -1;
 }
 
 // The job manager's waits (0x551228, 0x5513BC): r3 + 4 points to a block whose 16-bit job counters at +0x12..+0x1F the
@@ -295,7 +319,9 @@ void set_thread_name(const char* name) {
     w[i] = 0;
     fn(GetCurrentThread(), w);
 #else
-    (void)name;
+    char n[16];   // (at most 15 characters)
+    snprintf(n, sizeof(n), "%s", name);
+    pthread_setname_np(pthread_self(), n);
 #endif
 }
 
@@ -686,6 +712,7 @@ static void thread_body(PPUThread* t) {
         t->exit_status = e.status;
     }
     LOG_I("thread %08x '%s' exited (status %llx)", t->id, t->name.c_str(), (unsigned long long)t->exit_status);
+    line_wait_thread_exit();
     {
         std::lock_guard lk(t->m);
         t->finished = true;
@@ -709,6 +736,35 @@ static std::string backtrace_of(const PPUContext& c) {
     return bt;
 }
 
+// the main thread's samples of the last ~8 s, for profile_main_between (slow frames)
+struct MainSample { u64 t; u32 fn; const char* hle; u8 busy; };
+static MainSample g_main_ring[4096];
+static std::atomic<u32> g_main_pos{0};
+
+// what the main thread did between two times (F1CE_PROFILE only): its most frequent states, with the number of busy SPU
+// workers in brackets
+std::string profile_main_between(u64 t0, u64 t1) {
+    std::map<std::string, int> h;
+    int total = 0;
+    const u32 end = g_main_pos.load();
+    for (u32 i = end, n = 0; i-- > 0 && n < 4096; n++) {
+        const MainSample& s = g_main_ring[i % 4096];
+        if (s.t < t0) break;
+        if (s.t > t1) continue;
+        char b[64];
+        if (s.hle) snprintf(b, sizeof(b), "hle %s[%u]", s.hle, s.busy);
+        else snprintf(b, sizeof(b), "fn %08x[%u]", s.fn, s.busy);
+        h[b]++;
+        total++;
+    }
+    std::vector<std::pair<int, std::string>> v;
+    for (auto& [k, n] : h) v.push_back({n, k});
+    std::sort(v.rbegin(), v.rend());
+    std::string line;
+    for (size_t i = 0; i < v.size() && i < 6; i++) line += " " + v[i].second + " " + std::to_string(v[i].first);
+    return std::to_string(total) + " samples:" + line;
+}
+
 // Profiling aid (F1CE_PROFILE=1): samples every 2 ms what each guest thread is doing (the HLE call it blocks
 // in, or the guest function it executes) and logs the most frequent states per thread every 10 s.
 void start_profiler() {
@@ -727,6 +783,13 @@ void start_profiler() {
                     if (hle) snprintf(b, sizeof(b), "hle %s", hle);
                     else snprintf(b, sizeof(b), "fn %08x", t->ctx.cur_fn);
                     hist[t->name][b]++;
+                    if (t->name == "main") {
+                        extern std::atomic<int> g_worker_wid[8];
+                        u8 busy = 0;
+                        for (int k = 0; k < 5; k++) busy += g_worker_wid[k].load() >= 0;
+                        g_main_ring[g_main_pos % 4096] = {time_usec(), t->ctx.cur_fn, hle, busy};
+                        g_main_pos++;
+                    }
                     // what the SPU workers run while main waits for them (job counters / task event flag)
                     if (t->name == "main" && (strcmp(b, "fn 00551228") == 0 || strcmp(b, "hle cellSpursEventFlagWait") == 0)) {
                         extern std::atomic<int> g_worker_wid[8];
@@ -765,7 +828,10 @@ void start_profiler() {
 
 // With at least 12 logical processors (assumed two per core): the renderer gets a core, with its second logical processor
 // left to the rest of the process, and the SPU workers stay off it, so their polling does not slow the renderer down.
-// F1CE_PIN=1 also gives the main PPU thread a core, F1CE_PIN=0 leaves all threads to the system.
+// The renderer only prefers its processor (ideal processor), it is not bound to it: hard-pinned, it sometimes did not run
+// for 10-30 ms while something above its priority held that processor (not one of our threads: HIGHEST priority did not
+// help), and the flip label the vblank handler released was taken a vblank late every 0.25-0.5 s (30 fps average, 1% low
+// ~16 at Silverstone). F1CE_PIN=1 also gives the main PPU thread a core, F1CE_PIN=0 leaves all threads to the system.
 void place_thread(int kind) {
 #ifdef _WIN32
     static const char* pin = getenv("F1CE_PIN");
@@ -776,7 +842,12 @@ void place_thread(int kind) {
     const u64 all = n == 64 ? ~0ull : (1ull << n) - 1;
     const bool only_rsx = !pin || pin[0] != '1';
     if (only_rsx && kind == 1) return;
-    const u64 mask = kind == 0 ? 1ull << (n - 2) : kind == 1 ? 1ull << (n - 4) : all >> (only_rsx ? 2 : 4);
+    if (kind == 0) {
+        PROCESSOR_NUMBER p = {0, (BYTE)(n - 2), 0};
+        if (!SetThreadIdealProcessorEx(GetCurrentThread(), &p, nullptr)) LOG_W("place_thread: ideal processor not set");
+        return;
+    }
+    const u64 mask = kind == 1 ? 1ull << (n - 4) : all >> (only_rsx ? 2 : 4);
     if (!SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)mask)) LOG_W("place_thread: affinity not set");
 #endif
 }
@@ -788,6 +859,15 @@ void raise_thread_priority() {
 #ifdef _WIN32
     static const bool off = getenv("F1CE_PRIO") && getenv("F1CE_PRIO")[0] == '0';
     if (!off) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+#else
+    // a lower nice value for this thread only; refused without CAP_SYS_NICE or an RLIMIT_NICE allowance (the usual
+    // desktop and SteamOS case): then every thread stays at the same priority
+    static const bool off = getenv("F1CE_PRIO") && getenv("F1CE_PRIO")[0] == '0';
+    if (off) return;
+    if (setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), -5) != 0) {
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true)) LOG_I("thread priority: not raised (no permission), all threads at normal priority");
+    }
 #endif
 }
 
@@ -800,6 +880,17 @@ void limit_cpus() {
     const int n = atoi(e);
     if (n <= 0 || n >= 64) return;
     if (SetProcessAffinityMask(GetCurrentProcess(), (DWORD_PTR)((1ull << n) - 1))) LOG_I("F1CE_CPUS: %d logical processors", n);
+    else LOG_W("F1CE_CPUS: affinity not set");
+#else
+    const char* e = getenv("F1CE_CPUS");
+    if (!e) return;
+    const int n = atoi(e);
+    if (n <= 0 || n >= CPU_SETSIZE) return;
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    for (int i = 0; i < n; i++) CPU_SET(i, &set);
+    // (called before any thread starts: new threads inherit the mask)
+    if (!sched_setaffinity(0, sizeof(set), &set)) LOG_I("F1CE_CPUS: %d logical processors", n);
     else LOG_W("F1CE_CPUS: affinity not set");
 #endif
 }
@@ -992,6 +1083,19 @@ void start_watchdog(u32 period_s) {
                               ld16(tbl + 0x10), base, cs.c_str());
                         LOG_I("      jobs:%s", jobs.c_str());
                     }
+                }
+                if (c.cur_fn == 0x5513b8 || c.cur_fn == 0x55127c || c.cur_fn == 0x551228) {
+                    // the same job manager wait in two reports in a row: a freeze (hle_joblist.cpp, F1CE_JOBLIST_LOG)
+                    static std::string last_wait;
+                    const u32 q = mem::readable(p, 8) ? ld32(p + 4) : 0;
+                    std::string w = std::to_string(t->id) + " " + std::to_string(c.cur_fn) + " " + std::to_string(p);
+                    if (mem::readable(q, 0x20))
+                        for (u32 k = 0; k < 8; k++) w += " " + std::to_string(ld16(q + 0x10 + 2 * k));
+                    if (w == last_wait) {
+                        extern void joblist_dump_current();
+                        joblist_dump_current();
+                    }
+                    last_wait = w;
                 }
                 if (c.cur_fn == 0x4d31cc) {   // audio thread waiting for its three job lists (fn 0x551358 each, from r29)
                     const u32 slots = (u32)c.r[29];

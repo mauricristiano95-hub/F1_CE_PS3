@@ -35,7 +35,12 @@ HOOKS = {0x3FB310: "camera_projection_hook",   # camera projection and frustum, 
 # debug probes: runtime code called with the context before the instruction at that address
 PROBES = {0x1187EC: "probe_1187ec", 0x11B05C: "probe_11b05c",   # hle_physics.cpp
           0x489AAC: "flip_label_written",   # hle_gcm.cpp: the flip handler set a label the RSX may wait for
-          0x48B054: "put_written"}   # hle_gcm.cpp: libgcm wrote PUT
+          0x48B054: "put_written",   # hle_gcm.cpp: libgcm wrote PUT
+          0x55165C: "joblist_job", 0x5516F0: "joblist_job", 0x551780: "joblist_entry",   # hle_joblist.cpp
+          0x5517F8: "joblist_entry", 0x551878: "joblist_wait", 0x5515D0: "joblist_reserve", 0x550F7C: "joblist_pad",
+          0x48ACC8: "joblist_compact", 0x489CB8: "joblist_w0_drained", 0x48ACA8: "joblist_prev_done",
+          0x5514A4: "joblist_push",
+          0x551278: "jobwait_551228", 0x551354: "jobwait_55127c", 0x55140C: "jobwait_5513b8"}   # spu_pm.cpp: taken jobs
 SPIN_LOOPS = {0x551228, 0x5513BC}   # the job manager's waits: they only poll counters the SPUs write
 
 LOAD_INT = {  # mnemonic: (size, signed, update, indexed)

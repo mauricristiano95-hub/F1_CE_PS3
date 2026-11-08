@@ -136,6 +136,7 @@ void line_wait_arm(LineWait& w, u32 line0, u32 line1);
 // Returns whether a write woke it (false: timeout, or it only registered again).
 bool line_wait_block(LineWait& w, u32 timeout_ms);
 void line_wait_release(LineWait& w);
+void line_wait_thread_exit();   // returns the thread's slot (PPU thread exit)
 using PPUFunc = void (*)(PPUContext&);
 
 struct FuncEntry { u32 addr; PPUFunc fn; };

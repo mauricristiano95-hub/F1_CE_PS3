@@ -9,6 +9,7 @@
 #include "kernel.h"
 
 #include <algorithm>
+#include <filesystem>
 #include <immintrin.h>
 #include <set>
 #include <sstream>
@@ -789,19 +790,25 @@ FPInfo translate_fp(u32 ea, u32 shader_control, u32 cube_mask) {
 // Linked programs are cached on disk (shader_cache/ next to the executable, keyed by the GLSL sources and the GL
 // driver): compiling the few hundred programs of a race scene took seconds on the first frames, during which no
 // frame was presented (white screen after loading).
+// F1CE_CACHE_DIR=<dir> puts it elsewhere (the Linux AppImage: its own folder is read-only).
 std::string shader_cache_dir() {
     static std::string dir = [] {
         std::string d = "shader_cache";
+        if (const char* e = getenv("F1CE_CACHE_DIR"); e && *e) d = e;
+        else {
 #ifdef _WIN32
-        char path[MAX_PATH];
-        DWORD n = GetModuleFileNameA(nullptr, path, MAX_PATH);
-        if (n && n < MAX_PATH) {
-            std::string s(path, n);
+            char path[MAX_PATH];
+            DWORD n = GetModuleFileNameA(nullptr, path, MAX_PATH);
+            std::string s = n && n < MAX_PATH ? std::string(path, n) : std::string();
+#else
+            std::error_code ec;
+            std::string s = std::filesystem::read_symlink("/proc/self/exe", ec).string();
+#endif
             size_t slash = s.find_last_of("\\/");
             if (slash != std::string::npos) d = s.substr(0, slash + 1) + "shader_cache";
         }
-        CreateDirectoryA(d.c_str(), nullptr);
-#endif
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::u8path(d), ec);
         return d;
     }();
     return dir;

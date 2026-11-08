@@ -7,6 +7,8 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 #include "host.h"
 #include "kernel.h"
@@ -67,8 +69,31 @@ namespace {
     X(PFNGLRENDERBUFFERSTORAGEMULTISAMPLEPROC, glRenderbufferStorageMultisample) X(PFNGLFENCESYNCPROC, glFenceSync) X(PFNGLCLIENTWAITSYNCPROC, glClientWaitSync) X(PFNGLDELETESYNCPROC, glDeleteSync) \
     X(PFNGLTEXBUFFERPROC, glTexBuffer) X(PFNGLUNIFORM4IVPROC, glUniform4iv) X(PFNGLDISPATCHCOMPUTEPROC, glDispatchCompute) X(PFNGLBINDIMAGETEXTUREPROC, glBindImageTexture) X(PFNGLMEMORYBARRIERPROC, glMemoryBarrier) X(PFNGLGENERATEMIPMAPPROC, glGenerateMipmap) X(PFNGLDELETEPROGRAMPROC, glDeleteProgram) X(PFNGLCOPYBUFFERSUBDATAPROC, glCopyBufferSubData)
 
+// GL 1.0/1.1 entry points: opengl32 exports them on Windows; elsewhere nothing links libGL, so they come from the
+// loader like the rest
+#ifdef _WIN32
+#define GL_FUNCS_1X(X)
+#else
+#define GL_FUNCS_1X(X) \
+    X(decltype(&::glBindTexture), glBindTexture) X(decltype(&::glClear), glClear) \
+    X(decltype(&::glClearColor), glClearColor) X(decltype(&::glClearDepth), glClearDepth) \
+    X(decltype(&::glClearStencil), glClearStencil) X(decltype(&::glColorMask), glColorMask) \
+    X(decltype(&::glCullFace), glCullFace) X(decltype(&::glDeleteTextures), glDeleteTextures) \
+    X(decltype(&::glDepthFunc), glDepthFunc) X(decltype(&::glDepthMask), glDepthMask) \
+    X(decltype(&::glDisable), glDisable) X(decltype(&::glDrawArrays), glDrawArrays) \
+    X(decltype(&::glEnable), glEnable) X(decltype(&::glFinish), glFinish) X(decltype(&::glFrontFace), glFrontFace) \
+    X(decltype(&::glGenTextures), glGenTextures) X(decltype(&::glGetError), glGetError) \
+    X(decltype(&::glGetIntegerv), glGetIntegerv) X(decltype(&::glGetString), glGetString) \
+    X(decltype(&::glGetTexImage), glGetTexImage) X(decltype(&::glGetTexLevelParameteriv), glGetTexLevelParameteriv) \
+    X(decltype(&::glGetTexParameteriv), glGetTexParameteriv) X(decltype(&::glPixelStorei), glPixelStorei) \
+    X(decltype(&::glReadPixels), glReadPixels) X(decltype(&::glScissor), glScissor) \
+    X(decltype(&::glTexImage2D), glTexImage2D) X(decltype(&::glTexParameterf), glTexParameterf) \
+    X(decltype(&::glTexParameteri), glTexParameteri) X(decltype(&::glViewport), glViewport)
+#endif
+
 #define X(type, name) type name;
 GL_FUNCS(X)
+GL_FUNCS_1X(X)
 #undef X
 
 bool load_gl() {
@@ -77,6 +102,7 @@ bool load_gl() {
     name = (type)host::gl_proc(#name);                    \
     if (!name) { LOG_E("GL: missing %s", #name); ok = false; }
     GL_FUNCS(X)
+    GL_FUNCS_1X(X)
 #undef X
     return ok;
 }
@@ -1003,7 +1029,7 @@ struct RegionEntry {
 std::unordered_map<u64, RegionEntry> g_regions;
 
 // drops vertex/index buffers not drawn for 120 frames (dynamic geometry in ring buffers gets a new key every frame)
-void evict_index_caches();
+void evict_index_caches(u32 slices);
 void evict_buffers() {
     std::vector<GLuint> dead;
     for (auto it = g_vtx_cache.begin(); it != g_vtx_cache.end();)
@@ -1011,7 +1037,7 @@ void evict_buffers() {
             if (it->second.buf) dead.push_back(it->second.buf);
             it = g_vtx_cache.erase(it);
         } else ++it;
-    evict_index_caches();
+    evict_index_caches(1);
     for (auto it = g_regions.begin(); it != g_regions.end();)
         if (g_frame - it->second.last_frame > 120) {
             if (it->second.buf) dead.push_back(it->second.buf);

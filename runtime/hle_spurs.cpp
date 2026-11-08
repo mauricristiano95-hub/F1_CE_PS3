@@ -20,6 +20,7 @@ double watch_after();   // core.cpp (debug)
 u64 dma_count(int k);   // spu.cpp (profiling)
 void line_written(u32 ea);         // core.cpp: a write under the lock (fails SPU PUTLLCs on the line)
 void place_thread(int kind);   // core.cpp
+void joblist_kick(u32 queue, u32 value);   // hle_joblist.cpp (F1CE_JOBLIST_LOG): ready stores, workers entering
 void profile_register_thread();   // core.cpp (host profiler)
 extern std::atomic<u64> g_pm_skips;           // spu_pm.cpp: job queue skip entries passed (diagnostics)
 extern std::atomic<u32> g_pm_skip_run_max;
@@ -136,7 +137,11 @@ u64 run_workload(SPUThread& spu, u32 wid, const Workload& w) {
         fatal("SPURS wkl %u: PM branched to unknown kernel address %05x (r0=%05x srr0=%05x ints=%d ev=%x/%x)%s", wid, s.pc, s.pref(0),
               s.srr0, s.interrupts, s.event_stat, s.event_mask, tr.c_str());
     };
+    // the audio workload prints through the same send_event routine as the tasks (port 15, then two InMbox reads): it
+    // waited for ever on the second word, music stopped and main later blocked on audio state (Time Trial load freeze)
     spu.on_send_event = spurs_send_event;
+    spu.event_needs_completion = true;
+    spu.event_completion_pending = false;
     // the pit-entry job (job manager wkl 5) asserts that interrupts are enabled and stopped with stopd: the job never
     // finished and the PPU waited forever for its completion (freeze entering the pits)
     spu.report_ie = true;
@@ -277,7 +282,8 @@ void spu_worker(u32 num) {
     LineWait idle_lw;
     static const bool old_idle = getenv("F1CE_SPIN_WAIT") != nullptr;
     for (;;) {
-        int wid = -1;
+        int wid = -1, rule = 0;
+        u32 ready_at_pick = 0;
         Workload w;
         {
             std::lock_guard lk(g_sp.m);
@@ -291,12 +297,21 @@ void spu_worker(u32 num) {
                 Workload& c = g_sp.wkl[i];
                 u32 ready = ld8(g_sp.ea + i);
                 if (!c.used || !ready || c.running >= std::min(ready, c.max_contention)) continue;
-                if (c.running < best_running) { best_running = c.running; wid = (int)i; }
+                if (c.running < best_running) { best_running = c.running; wid = (int)i; rule = 1; }
             }
-            // 2) join a workload that has been busy for a while (likely a parallel job) up to its contention
+            // 2) join a workload that has been busy for a while (likely a parallel job) up to its contention, while it
+            //    still signals work: a PM clears its ready count when its queue runs dry, and one let into a finished
+            //    frame list (ready 0, its last PM still inside) took the next frame's reserved skip entries while main
+            //    was building it, before the SPU writers filled them: the frame's jobs were lost and its in-order jobs
+            //    waited for ever (the race freeze, 2026-11-07). F1CE_SPURS_JOIN_IDLE=1: the old rule (A/B)
+            static const bool join_idle = getenv("F1CE_SPURS_JOIN_IDLE") != nullptr;
             for (u32 i = 0; i < 16 && wid < 0; i++) {
                 Workload& c = g_sp.wkl[i];
-                if (c.used && c.running > 0 && c.running < c.max_contention && now - c.busy_since > 1000) wid = (int)i;
+                if (c.used && c.running > 0 && c.running < c.max_contention && now - c.busy_since > 1000 &&
+                    (join_idle || ld8(g_sp.ea + i) > 0)) {
+                    wid = (int)i;
+                    rule = 2;
+                }
             }
             // 3) otherwise round-robin over the workloads that can take another SPU
             //    Like the SPURS kernel, only signalled workloads run (plus one initial run each);
@@ -305,7 +320,7 @@ void spu_worker(u32 num) {
             for (u32 k = 0; k < 16 && wid < 0; k++) {
                 u32 i = (g_sp.rr + k) % 16;
                 Workload& c = g_sp.wkl[i];
-                if (c.used && c.running < c.max_contention && (!ready_only || c.runs == 0)) wid = (int)i;
+                if (c.used && c.running < c.max_contention && (!ready_only || c.runs == 0)) { wid = (int)i; rule = 3; }
             }
             if (wid >= 0 && getenv("F1CE_WATCH_LINE") && now / 1e6 >= watch_after()) {
                 static std::atomic<int> n{0};
@@ -314,6 +329,7 @@ void spu_worker(u32 num) {
                           g_sp.wkl[wid].running, g_sp.wkl[wid].max_contention);
             }
             if (wid >= 0) {
+                ready_at_pick = ld8(g_sp.ea + wid);
                 g_sp.rr = wid + 1;
                 if (g_sp.wkl[wid].running == 0) g_sp.wkl[wid].busy_since = now;
                 g_sp.wkl[wid].running++;
@@ -335,6 +351,7 @@ void spu_worker(u32 num) {
         idle_since = 0;
         u64 run_t0 = time_usec();
         g_worker_wid[num & 7].store(wid, std::memory_order_relaxed);
+        joblist_kick((u32)w.arg, num << 12 | rule << 8 | ready_at_pick);
         u64 n = run_workload(*spu, (u32)wid, w);
         g_worker_wid[num & 7].store(-1, std::memory_order_relaxed);
         if (w.runs < 8) {   // diagnostics: rarely run workloads (the pit-entry job manager)
@@ -500,6 +517,19 @@ void spu_worker(u32 num) {
 
 // Watchdog (core.cpp): what each SPU worker runs and the scheduler's view of every workload (racy, diagnostics only).
 // The SPURS report above is printed only when a run ends, so a freeze with every worker idle or stuck shows nothing.
+SPUThread* spurs_worker_spu(u32 k) { return k < 8 ? g_worker_spu[k] : nullptr; }   // diagnostics (hle_joblist.cpp)
+// SPU workers inside the workload whose argument is the job queue `q` (spu_pm.cpp: the job waits)
+u32 spurs_workers_on_queue(u32 q) {
+    for (u32 i = 0; i < 16; i++) {
+        Workload& w = g_sp.wkl[i];
+        if (!std::atomic_ref<bool>(w.used).load(std::memory_order_relaxed) || (u32)w.arg != q) continue;
+        u32 n = 0;
+        for (u32 k = 0; k < 8; k++) n += g_worker_wid[k].load(std::memory_order_relaxed) == (int)i;
+        return n;
+    }
+    return 0;
+}
+
 void spurs_watchdog_report() {
     if (!g_sp.ea) return;
     std::string ws;
@@ -514,7 +544,7 @@ void spurs_watchdog_report() {
     const u64 now = time_usec();
     std::string ls;
     for (u32 i = 0; i < 16; i++) {
-        const Workload& w = g_sp.wkl[i];
+        Workload& w = g_sp.wkl[i];
         if (!w.used) continue;
         char b[80];
         snprintf(b, sizeof(b), " w%u:ready%u/run%u/max%u/idle%.1fs", i, ld8(g_sp.ea + i), w.running, w.max_contention,
@@ -523,7 +553,7 @@ void spurs_watchdog_report() {
     }
     LOG_I("  spurs workloads:%s", ls.c_str());
     for (u32 i = 0; i < 16; i++) {
-        const Workload& w = g_sp.wkl[i];
+        Workload& w = g_sp.wkl[i];
         if (!w.used || w.pm != g_sp.wkl[1].pm || !mem::readable((u32)w.arg, 64)) continue;   // job managers: queue head
         std::string h;
         for (u32 k = 0; k < 64; k += 4) { char b[12]; snprintf(b, sizeof(b), " %08x", ld32((u32)w.arg + k)); h += b; }
@@ -570,6 +600,7 @@ HLE_FUNC(cellSpursReadyCountStore) {
         st8(g_sp.ea + wid, (u8)std::min<u32>((u32)ARG(2), 255));
         line_written(g_sp.ea);   // even an unchanged value: a PM deciding "no work" on the old line must retry
     }
+    joblist_kick((u32)g_sp.wkl[wid].arg, (u32)ARG(2));
     if (g_ready_calls[wid]++ < 20) {
         LOG_I("cellSpursReadyCountStore(spurs=%08llx, wid=%u, %u) t=%.2fs", (unsigned long long)ARG(0), wid, (u32)ARG(2),
               time_usec() / 1e6);
@@ -671,11 +702,14 @@ std::unique_ptr<SPUThread> take_task_context(u32 elf) {
 // connected to an lv2 event queue here, so the request is acknowledged (CELL_OK) and logged. Without a reply the SPU
 // waited forever on its second mailbox write, its task never finished and the PPU waited on an event flag that
 // task would have set (freeze in the race).
+// Prints (data1 -> saved registers, r4 first = format string) are logged with their text.
 u32 spurs_send_event(SPUThread& s, u32 intr, u32 data1) {
     static std::atomic<int> n{0};
-    if (n++ < 50)
-        LOG_I("SPU %s: send_event port %u data0=%06x data1=%08x at %05x (acknowledged)", s.name.c_str(), intr >> 24, intr & 0xFFFFFF,
-              data1, s.pc);
+    if (n++ < 50) {
+        u32 p = __builtin_bswap32(*(u32*)(s.ls + (data1 & 0x3FFF0))) & 0x3FFFF;
+        LOG_I("SPU %s: send_event port %u data0=%06x data1=%08x at %05x (acknowledged) print: %.80s", s.name.c_str(), intr >> 24,
+              intr & 0xFFFFFF, data1, s.pc, (const char*)s.ls + p);
+    }
     return 0;
 }
 
@@ -738,14 +772,7 @@ void run_task(u32 tid, Task t) {
     // keeps failing, for instance while another task is preempted between PopBegin and PopEnd, more likely in heavy
     // scenes (Monaco grid). The routine waits for a second mailbox word from the PPU-side handler, which never came:
     // the task hung, main waited on its flag for ever (freeze with SPURS workloads 0-2 and 4 idle).
-    spu->on_send_event = [](SPUThread& s, u32 intr, u32 data1) {
-        static std::atomic<int> n{0};
-        if (n++ < 20) {
-            u32 p = __builtin_bswap32(*(u32*)(s.ls + (data1 & 0x3FFF0))) & 0x3FFFF;
-            LOG_I("SPU %s print: %.60s", s.name.c_str(), (const char*)s.ls + p);
-        }
-        return spurs_send_event(s, intr, data1);
-    };
+    spu->on_send_event = spurs_send_event;
     spu->event_needs_completion = true;
     spu->report_ie = true;
     spu->id = 8 + tid;

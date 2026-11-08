@@ -1,0 +1,222 @@
+#!/bin/sh
+# Launcher of the Linux build (the AppImage's entry point; also works from an unpacked folder next to usr/bin/f1ce).
+#
+#   F1CE-x86_64.AppImage                 start the game (asks for the PS3_GAME folder the first time)
+#   F1CE-x86_64.AppImage --settings      settings dialog (zenity), then start
+#   F1CE-x86_64.AppImage --game-dir DIR  use DIR as the PS3_GAME folder from now on, then start
+#   F1CE-x86_64.AppImage --reset         forget the game folder and every setting
+#   F1CE-x86_64.AppImage --where         print the settings, save data, log and shader cache locations
+#   F1CE-x86_64.AppImage --trace         passed to the game (logs every HLE call, very slow)
+#
+# Settings live in ~/.config/f1ce-recomp/settings.conf, one NAME=value per line: the game folder (F1CE_GAME_DIR) and
+# any F1CE_* variable from the README. Variables already set in the environment win over the file (Steam launch
+# options such as "F1CE_SCALE=2 %command%" work). On a Steam Deck, unset options get Deck defaults (below).
+# Save data and the log (f1ce_recomp.log) are in ~/.local/share/f1ce-recomp, shaders in ~/.cache/f1ce-recomp.
+
+HERE=$(dirname "$(readlink -f "$0")")
+BIN="$HERE/usr/bin/f1ce"
+CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/f1ce-recomp"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/f1ce-recomp"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/f1ce-recomp"
+CONF="$CONF_DIR/settings.conf"
+TITLE="F1 Championship Edition"
+
+# ------------------------------------------------------------------ messages
+have() { command -v "$1" >/dev/null 2>&1; }
+gui() { [ -n "$DISPLAY$WAYLAND_DISPLAY" ]; }
+info() {
+    echo "$1"
+    if gui && have zenity; then zenity --info --title="$TITLE" --width=420 --text="$1" 2>/dev/null
+    elif gui && have kdialog; then kdialog --title "$TITLE" --msgbox "$1" 2>/dev/null
+    fi
+}
+fail() {
+    echo "error: $1" >&2
+    if gui && have zenity; then zenity --error --title="$TITLE" --width=420 --text="$1" 2>/dev/null
+    elif gui && have kdialog; then kdialog --title "$TITLE" --error "$1" 2>/dev/null
+    fi
+    exit 1
+}
+
+# ------------------------------------------------------------------ settings file
+conf_get() {   # conf_get NAME: value from the settings file (empty if absent)
+    [ -f "$CONF" ] && sed -n "s/^$1=//p" "$CONF" | tail -n 1
+}
+conf_set() {   # conf_set NAME VALUE: replaces or adds the line; an empty VALUE removes it
+    mkdir -p "$CONF_DIR"
+    touch "$CONF"
+    grep -v "^$1=" "$CONF" > "$CONF.tmp" 2>/dev/null
+    [ -n "$2" ] && printf '%s=%s\n' "$1" "$2" >> "$CONF.tmp"
+    mv "$CONF.tmp" "$CONF"
+}
+load_conf() {   # exports every F1CE_* line not already set in the environment
+    [ -f "$CONF" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in \#*|'') continue ;; esac
+        name=${line%%=*}
+        value=${line#*=}
+        case "$name" in F1CE_*) ;; *) continue ;; esac
+        case "$name" in *[!A-Z0-9_]*) continue ;; esac
+        eval "isset=\${$name+x}"
+        [ -n "$isset" ] || export "$name=$value"
+    done < "$CONF"
+}
+default() {   # default NAME VALUE: sets NAME unless the environment or the settings file has it
+    eval "isset=\${$1+x}"
+    [ -n "$isset" ] && return 0
+    grep -q "^$1=" "$CONF" 2>/dev/null && return 0
+    export "$1=$2"
+}
+
+# ------------------------------------------------------------------ Steam Deck
+deck=0
+if [ "$(cat /sys/devices/virtual/dmi/id/board_vendor 2>/dev/null)" = "Valve" ]; then
+    case "$(cat /sys/devices/virtual/dmi/id/product_name 2>/dev/null)" in Jupiter|Galileo) deck=1 ;; esac
+fi
+gamescope=0
+if [ -n "$GAMESCOPE_WAYLAND_DISPLAY" ] || [ "$XDG_CURRENT_DESKTOP" = "gamescope" ]; then gamescope=1; fi
+deck_default() {   # deck_default NAME: the value used on a Steam Deck when the option is unset (empty elsewhere)
+    [ "$deck" = 1 ] || return 0
+    case "$1" in
+        F1CE_RENDERER) echo vulkan ;;
+        F1CE_SCALE) echo 1280x800 ;;
+        F1CE_FULLSCREEN) echo 1 ;;
+    esac
+}
+
+# ------------------------------------------------------------------ game folder
+valid_game() { [ -n "$1" ] && [ -f "$1/USRDIR/EBOOT.elf" ]; }
+find_game() {   # the saved folder, else a PS3_GAME next to the AppImage or in the usual places
+    g=$(conf_get F1CE_GAME_DIR)
+    valid_game "$g" && { echo "$g"; return; }
+    base=$(dirname "${APPIMAGE:-$HERE}")
+    for g in "$base/PS3_GAME" "$base"/*/PS3_GAME "$HOME/Games/F1CE/PS3_GAME" "$HOME/Games/F1_CE_PS3/PS3_GAME" \
+             "$HOME/F1CE/PS3_GAME" /run/media/*/*/F1CE/PS3_GAME; do
+        valid_game "$g" && { echo "$g"; return; }
+    done
+}
+pick_game() {
+    msg="Select the game's PS3_GAME folder (it must contain USRDIR/EBOOT.elf, the decrypted executable)."
+    if gui && have zenity; then
+        zenity --file-selection --directory --title="$msg" 2>/dev/null
+    elif gui && have kdialog; then
+        kdialog --title "$msg" --getexistingdirectory "$HOME" 2>/dev/null
+    elif [ -t 0 ]; then
+        printf '%s\nPath: ' "$msg" >&2
+        read -r g
+        echo "$g"
+    fi
+}
+
+# ------------------------------------------------------------------ settings dialog
+# One option per line: NAME|labels...|values... (as many values as labels, in the same order; the first is the
+# game's default, "-" = option unset). Options with Steam Deck defaults store every choice explicitly (opengl, 1, 0
+# mean the same as unset), else the Deck default would come back.
+OPTIONS='F1CE_RENDERER|OpenGL|Vulkan|opengl|vulkan
+F1CE_SCALE|1280x720 (16:9, original)|1280x800 (16:10, Steam Deck)|1920x1080 (16:9)|2560x1440 (16:9)|3840x2160 (16:9)|904x565 (16:10, light)|1|1280x800|1.5|2|3|904x565
+F1CE_FULLSCREEN|Window|Full screen|0|1
+F1CE_VSYNC|On|Off|Adaptive|-|0|-1
+F1CE_MSAA|4x (original)|2x|8x|-|2|8
+F1CE_FXAA|Off|On|-|1
+F1CE_60FPS|30 fps (original)|Up to 60 fps (experimental)|-|1
+F1CE_FPS_CAP|None|30 fps|45 fps|-|30|45
+F1CE_RUMBLE|Normal|Light|Strong|Off|-|50|150|0
+F1CE_SKIP_INTRO|Show the language menu and intro|Skip them (start at Press Start)|-|1
+F1CE_LANGUAGE|English|Français|Deutsch|Italiano|Español|Português|Suomi|-|french|german|italian|spanish|portuguese|finnish'
+
+half_list() {   # half_list first|second "a|b|c|1|2|3" -> the labels or the values, one per line
+    n=$(echo "$2" | tr '|' '\n' | wc -l)
+    if [ "$1" = first ]; then echo "$2" | tr '|' '\n' | head -n $((n / 2))
+    else echo "$2" | tr '|' '\n' | tail -n $((n / 2)); fi
+}
+settings_dialog() {
+    if ! gui || ! have zenity; then
+        info "The settings dialog needs zenity. Edit $CONF instead (NAME=value lines, see the README)."
+        return 0
+    fi
+    set -- --forms --title="$TITLE" --width=480 --separator="|" --text="Settings (saved in $CONF)"
+    while IFS= read -r row; do
+        name=${row%%|*}
+        labels=$(half_list first "${row#*|}")
+        values=$(half_list second "${row#*|}")
+        cur=$(conf_get "$name")
+        [ -n "$cur" ] || cur=$(deck_default "$name")
+        pos=$(echo "$values" | grep -n -x -F -- "${cur:--}" | head -n 1 | cut -d: -f1)
+        # the current choice first (zenity may preselect the first entry)
+        ordered=$(echo "$labels" | sed -n "${pos:-1}p"; echo "$labels" | sed "${pos:-1}d")
+        set -- "$@" --add-combo="${name#F1CE_}" --combo-values="$(echo "$ordered" | tr '\n' '|' | sed 's/|$//')"
+    done <<EOF
+$OPTIONS
+EOF
+    out=$(zenity "$@" 2>/dev/null) || return 0
+    i=1
+    while IFS= read -r row; do
+        name=${row%%|*}
+        labels=$(half_list first "${row#*|}")
+        values=$(half_list second "${row#*|}")
+        picked=$(echo "$out" | cut -d'|' -f$i)
+        pos=$(echo "$labels" | grep -n -x -F -- "$picked" | head -n 1 | cut -d: -f1)
+        if [ -n "$picked" ] && [ -n "$pos" ]; then   # (nothing picked: unchanged)
+            v=$(echo "$values" | sed -n "${pos}p")
+            [ "$v" = "-" ] && v=""
+            conf_set "$name" "$v"
+        fi
+        i=$((i + 1))
+    done <<EOF
+$OPTIONS
+EOF
+}
+
+# ------------------------------------------------------------------ arguments
+GAME_ARGS=""
+want_settings=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --settings) want_settings=1 ;;
+        --game-dir) shift; valid_game "$1" || fail "Not a PS3_GAME folder (no USRDIR/EBOOT.elf): $1"
+                    conf_set F1CE_GAME_DIR "$(readlink -f "$1")" ;;
+        --reset) rm -f "$CONF"; echo "Settings removed ($CONF)"; exit 0 ;;
+        --where) echo "settings:     $CONF"; echo "save data:    $DATA_DIR/ps3_data"
+                 echo "log:          $DATA_DIR/f1ce_recomp.log"; echo "shader cache: $CACHE_DIR/shader_cache"; exit 0 ;;
+        -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) GAME_ARGS="$GAME_ARGS $1" ;;
+    esac
+    shift
+done
+
+[ -x "$BIN" ] || fail "f1ce executable missing at $BIN"
+[ "$want_settings" = 1 ] && settings_dialog
+
+GAME=$(find_game)
+if ! valid_game "$GAME"; then
+    GAME=$(pick_game)
+    [ -n "$GAME" ] || fail "No game folder selected. Start again with --game-dir /path/to/PS3_GAME."
+    valid_game "$GAME" || fail "Not a PS3_GAME folder with a decrypted USRDIR/EBOOT.elf: $GAME"
+fi
+GAME=$(readlink -f "$GAME")
+[ "$(conf_get F1CE_GAME_DIR)" = "$GAME" ] || conf_set F1CE_GAME_DIR "$GAME"
+
+load_conf
+
+# ------------------------------------------------------------------ Steam Deck defaults
+if [ "$deck" = 1 ]; then
+    # native panel resolution and Vulkan (RADV); the original 30 fps mode (60 fps is experimental)
+    for n in F1CE_RENDERER F1CE_SCALE F1CE_FULLSCREEN; do default $n "$(deck_default $n)"; done
+fi
+if [ "$gamescope" = 1 ]; then
+    default F1CE_FULLSCREEN 1
+    # gamescope (Steam Deck game mode) runs games through XWayland
+    [ -n "$SDL_VIDEO_DRIVER" ] || export SDL_VIDEO_DRIVER=x11
+fi
+
+# ------------------------------------------------------------------ run
+mkdir -p "$DATA_DIR" "$CACHE_DIR/shader_cache" || fail "Cannot create $DATA_DIR or $CACHE_DIR"
+export F1CE_CACHE_DIR="$CACHE_DIR/shader_cache"
+# program database shipped with the build: the first start compiles every shader up front (progress bar) instead of
+# during play; later runs add the programs they meet to the copy in the cache
+seed="$HERE/usr/share/f1ce-recomp/programs.bin"
+[ -f "$seed" ] && [ ! -f "$F1CE_CACHE_DIR/programs.bin" ] && cp "$seed" "$F1CE_CACHE_DIR/programs.bin"
+unset F1CE_GAME_DIR
+cd "$DATA_DIR" || exit 1
+# shellcheck disable=SC2086
+exec "$BIN" "$GAME" $GAME_ARGS

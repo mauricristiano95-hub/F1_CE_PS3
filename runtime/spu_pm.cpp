@@ -35,6 +35,82 @@ std::atomic<u32> g_pm_skip_run_max{0};
 static std::mutex g_skip_m;
 static std::map<u32, u32> g_skip_run;
 
+// Jobs a job manager has taken from a queue and not finished yet. The PPU's waits for a queue (fn 0x551228, 0x55127c,
+// 0x5513b8) read the per-SPU halfwords of the queue line, which the PM rewrites from its job slots (0x3260); a job the
+// grab took that is not in a slot yet (its buffers still loading) is missing from that minimum for a while, so a wait
+// can return with the job still to run. The game compacts a frame list right after such a wait (fn 0x48ac34) while a
+// w0 job is about to append in-order jobs to it: those land behind thousands of skip entries and the in-order chain
+// never reaches them (the race freeze at Interlagos, reproduced by toggling pause, 2026-11-07). jobwait_* (PROBES at the
+// waits' returns) also wait for the jobs listed here. A job is listed by the native grab, marked ended at the job
+// service 0x1670 (its slot is [0x12e0] there) and finished once no PM slot holds it any more (the PM frees a slot when
+// its outputs are back in main memory: they go out at the end of the next job on that SPU).
+namespace {
+struct Taken {
+    std::atomic<u64> key{0};   // queue EA << 32 | index; 0 free, 1 being filled
+    std::atomic<u64> since{0};
+    std::atomic<bool> ended{false};
+};
+Taken g_taken[48];
+std::atomic<u32> g_taken_lost{0}, g_taken_stale{0};
+constexpr u64 TAKEN_MAX_US = 100000;   // listed longer: its end was not seen (a path left to the original code)
+}  // namespace
+SPUThread* spurs_worker_spu(u32 k);   // hle_spurs.cpp
+
+static bool in_a_slot(u64 key) {
+    for (u32 k = 0; k < 8; k++)
+        if (const SPUThread* t = spurs_worker_spu(k))
+            for (u32 s = 0; s < 3; s++)
+                if (((u64)t->ls32(0x1430 + s * 32) << 32 | (t->ls32(0x1438 + s * 32) & 0xFFFF)) == key) return true;
+    return false;
+}
+// a listed job that is finished (or stale) leaves the list; true when it is still open
+static bool taken_open(Taken& e, u64 key, u64 now) {
+    if (now - e.since.load(std::memory_order_relaxed) > TAKEN_MAX_US) {
+        const bool unseen = !e.ended.load(std::memory_order_acquire);   // (an ended job still in a slot runs on)
+        if (e.key.compare_exchange_strong(key, 0) && unseen) g_taken_stale++;
+        return false;
+    }
+    if (!e.ended.load(std::memory_order_acquire) || in_a_slot(key)) return true;
+    e.key.compare_exchange_strong(key, 0);
+    return false;
+}
+void joblist_w0_event(char kind, u32 idx, u32 spu, u32 a, u32 b);   // hle_joblist.cpp (F1CE_JOBLIST_LOG)
+static void inflight_add(u32 q, u32 idx) {
+    if (q == 0x10410D80) joblist_w0_event('G', idx, 0, 0, 0);
+    const u64 v = (u64)q << 32 | idx, now = time_usec();
+    for (int pass = 0; pass < 2; pass++)
+        for (auto& e : g_taken) {
+            u64 k = e.key.load(std::memory_order_relaxed);
+            if (pass && k > 1 && !taken_open(e, k, now)) k = e.key.load(std::memory_order_relaxed);   // reclaim
+            u64 z = 0;
+            if (k == 0 && e.key.compare_exchange_strong(z, 1)) {
+                e.since.store(now, std::memory_order_relaxed);
+                e.ended.store(false, std::memory_order_relaxed);
+                e.key.store(v, std::memory_order_release);
+                return;
+            }
+        }
+    if (g_taken_lost++ == 0) LOG_W("pm: taken-jobs list full (queue %08x job %u not listed)", q, idx);
+}
+// 0x1670 (the job service at the end of a job), before it runs: the ending job's slot is [0x12e0]
+void spu_pm_job_end(const SPUThread& t) {
+    const u32 info = 0x1430 + (t.ls32(0x12E0) & 3) * 32;
+    const u64 v = (u64)t.ls32(info) << 32 | (t.ls32(info + 8) & 0xFFFF);
+    if ((u32)(v >> 32) == 0x10410D80) joblist_w0_event('E', (u32)v, t.id, 0, 0);
+    for (auto& e : g_taken)
+        if (e.key.load(std::memory_order_acquire) == v) { e.ended.store(true, std::memory_order_release); return; }
+}
+// a job of queue q below index `below` taken and not finished
+bool job_inflight(u32 q, u32 below) {
+    const u64 now = time_usec();
+    bool open = false;
+    for (auto& e : g_taken) {
+        const u64 k = e.key.load(std::memory_order_acquire);
+        if (k > 1 && (u32)(k >> 32) == q && (u32)k < below && taken_open(e, k, now)) open = true;
+    }
+    return open;
+}
+
 // FNV-1a 64 of the PM image the native functions were written from (checked when a workload is added)
 bool spu_pm_image_ok(const u8* image, u32 size) {
     if (size != 0x2B80) return false;
@@ -752,6 +828,13 @@ bool Pm::grab() {
         }
         const u32 ent = 0xD00 + off;
         const u32 e0 = rd32(ent), e1 = rd32(ent + 4), kind = e0 & 0xFFFF;
+        static const bool stale_log = getenv("F1CE_JOBLIST_LOG") != nullptr;
+        if (stale_log && kind == 3 && (ld32(at) & 0xFFFF) != 3) {   // debug: the cached line is older than the entry
+            static std::atomic<int> n{0};
+            if (n++ < 60)
+                LOG_W("pm: queue %08x entry %u is a skip in the cached line but %08x %08x in memory (head %u top %u)",
+                      ea, h, ld32(at), ld32(at + 4), h, top);
+        }
         const u32 h1 = (h + 1) & 0xFFFF, top1 = top > h1 ? top : h1;
         u128 nq = set_word(q90, 0, top1 << 16 | h1);
         n += 14;
@@ -800,6 +883,7 @@ bool Pm::grab() {
         if (kind != 1 || (st & 1)) continue;   // a wait or skip entry passed, or the update failed: again
         stq(0x14B0, 0);
         set_r3(e0, e1, 0, h);
+        inflight_add(ea, h);
         static const bool skip_log = getenv("F1CE_PM_SKIP_LOG") != nullptr;
         if (skip_log) {   // debug: a job that follows a long run of skips (also over several grabs)
             static int logged = 0;
@@ -1023,3 +1107,50 @@ bool spu_pm_job_done(SPUThread& t) { return run_native(t, g_chk_job_done, {1, 3,
 bool spu_pm_grab(SPUThread& t) { return run_native(t, g_chk_grab, {3}, &Pm::grab, t.pref(3) & ~127u); }
 bool spu_pm_irq_enter(SPUThread& t) { return run_native(t, g_chk_irq_enter, g_first80, &Pm::irq_enter); }
 bool spu_pm_irq_leave(SPUThread& t) { return run_native(t, g_chk_irq_leave, g_first80, &Pm::irq_leave); }
+
+// PROBES at the returns of the PPU's job waits (tools/recomp.py): the counters the game read are past its target; wait
+// also until no job below it is still taken and unfinished (see g_taken), and after the waits for a whole queue (a frame
+// list: fn 0x5513b8 from 0x48ac34, which then resets it for the next frame; w0: fn 0x55127c, after which the frame end
+// compacts the current list) until no job manager is still inside its workload. A PM leaves an emptied queue by
+// releasing its halfword, grabbing again, clearing its ready count and grabbing once more: in paused frames main reset
+// the list and reserved the next frame's entries within that gap (a host thread can lose the CPU there for a time
+// slice), the PM took the reserve's skip entries before the writers filled them and the frame's jobs were lost (the same
+// freeze). Without the w0 part a w0 job still appended in-order jobs after the compaction (1 freeze in 4 repro runs).
+// Bounded: a job whose end was not seen, or a PM that stays, cannot hang the game.
+u32 spurs_workers_on_queue(u32 q);   // hle_spurs.cpp
+static void wait_jobs(u32 q, u32 below, bool reset_next) {
+    auto busy = [&] { return job_inflight(q, below) || (reset_next && spurs_workers_on_queue(q)); };
+    if (!busy()) return;
+    const bool inflight0 = job_inflight(q, below);
+    const u32 inside0 = reset_next ? spurs_workers_on_queue(q) : 0;
+    static std::atomic<u64> waits{0}, waited_us{0}, max_us{0}, window{0};
+    const u64 t0 = time_usec();
+    u64 now = t0;
+    for (int spins = 0; busy(); spins++) {
+        now = time_usec();
+        if (now - t0 > 20000) {
+            static std::atomic<int> warned{0};
+            if (warned++ < 5)
+                LOG_W("pm: queue %08x still busy after 20 ms (taken jobs below %u: %d, job managers inside: %u); not waiting longer",
+                      q, below, job_inflight(q, below), spurs_workers_on_queue(q));
+            break;
+        }
+        if (spins < 64) _mm_pause(); else std::this_thread::yield();
+    }
+    const u64 us = now - t0;
+    static std::atomic<int> long_logged{0};
+    if (us > 2000 && long_logged++ < 30)
+        LOG_I("job wait long: queue %08x below %u reset_next %d: %llu us (taken open %d, managers inside %u at start)", q, below,
+              reset_next, (unsigned long long)us, inflight0, inside0);
+    waits++;
+    waited_us += us;
+    for (u64 m = max_us.load(); us > m && !max_us.compare_exchange_weak(m, us);) {}
+    u64 w = window.load();
+    if (now - w >= 5000000 && window.compare_exchange_strong(w, now) && w)
+        LOG_I("job waits: %llu waited for taken jobs or job managers (%llu us, longest %llu us) in 5 s; %u taken jobs whose end "
+              "was not seen", (unsigned long long)waits.exchange(0), (unsigned long long)waited_us.exchange(0),
+              (unsigned long long)max_us.exchange(0), g_taken_stale.exchange(0));
+}
+void jobwait_551228(PPUContext& c) { wait_jobs(ld32((u32)c.r[3] + 4), (u32)c.r[4] & 0xFFFF, false); }   // r4 = target
+void jobwait_55127c(PPUContext& c) { wait_jobs(ld32((u32)c.r[3] + 4), 0x10000, true); }                 // every job
+void jobwait_5513b8(PPUContext& c) { wait_jobs(ld32((u32)c.r[3] + 4), ld16((u32)c.r[3] + 38), true); }

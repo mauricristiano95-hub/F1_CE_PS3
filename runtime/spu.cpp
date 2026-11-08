@@ -567,8 +567,10 @@ void SPUThread::dma(u32 cmd) {
         halted = true;
         return;
     }
+    extern void joblist_spu_write(const char*, u32, u32, const u8*, u32, const u8*);   // hle_joblist.cpp (F1CE_JOBLIST_LOG)
     switch (cmd & 0xFF) {
         case 0x20: case 0x21: case 0x22: case 0x28: case 0x29: case 0x2A:   // PUT[B|F] (+ S variants)
+            joblist_spu_write(name.c_str(), pc, ea, ls + lsa, size, ls);
             memcpy(gmem(ea), ls + lsa, size);
             guest_written(ea, size);
             break;
@@ -612,6 +614,7 @@ void SPUThread::dma(u32 cmd) {
             }
             std::lock_guard lk(atomic_lock(ea));
             bool ok = has_reservation && res_addr == ea && (no_gen || res_gen == line_generation(ea)) && same_bytes(gmem(ea), res_data, 128);
+            if (ok) joblist_spu_write(name.c_str(), pc, ea, ls + (lsa & 0x3FF80), 128, ls);
             if (ok) ok = putllc_store(gmem(ea), res_data, ls + (lsa & 0x3FF80));
             if (ok) line_written(ea);
             if (!ok) g_dma_counters[id & 15].c[4].fetch_add(1, std::memory_order_relaxed);
@@ -645,7 +648,12 @@ void SPUThread::run_list(u32 tag) {
             // the element's LS address keeps the EA's offset within the quadword (relevant for sizes < 16)
             u32 elsa = (L.lsa | (e1 & 15)) & 0x3FFFF;
             if (L.get) write_ls(elsa, gmem(e1), ts);
-            else if (!dma_log) { memcpy(gmem(e1), ls + elsa, ts); guest_written(e1, ts); }
+            else if (!dma_log) {
+                extern void joblist_spu_write(const char*, u32, u32, const u8*, u32, const u8*);
+                joblist_spu_write(name.c_str(), pc, e1, ls + elsa, ts, ls);
+                memcpy(gmem(e1), ls + elsa, ts);
+                guest_written(e1, ts);
+            }
             extern u32 g_watch_line;
             if (!L.get && g_watch_line < e1 + ts && e1 < g_watch_line + 128) {   // debug: F1CE_WATCH_LINE also covers list puts
                 static std::atomic<int> n{0};

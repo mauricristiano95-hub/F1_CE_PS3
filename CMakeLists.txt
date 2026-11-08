@@ -10,12 +10,7 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
-if(WIN32)
-  set(F1CE_HOST_DEFAULT SDL)
-else()
-  set(F1CE_HOST_DEFAULT NULL)
-endif()
-set(F1CE_HOST ${F1CE_HOST_DEFAULT} CACHE STRING "Host backend: SDL (window/audio/input) or NULL (headless)")
+set(F1CE_HOST SDL CACHE STRING "Host backend: SDL (window/audio/input) or NULL (headless)")
 option(F1CE_VULKAN "Vulkan renderer next to OpenGL, F1CE_RENDERER=vulkan selects it (needs third_party/glslang)" OFF)
 option(F1CE_TRACE_PC "Track the guest PC of memory accesses and F1CE_WATCH_LINE stores (debugging, slower)" OFF)
 if(F1CE_TRACE_PC)
@@ -37,6 +32,7 @@ set(RUNTIME_SOURCES
   runtime/hle_aspect.cpp
   runtime/hle_cubemap.cpp
   runtime/hle_skipfn.cpp
+  runtime/hle_joblist.cpp
   runtime/hle_quickrace.cpp
   runtime/hle_boot.cpp
   runtime/hle_physics.cpp
@@ -116,5 +112,10 @@ if(WIN32)
   target_link_libraries(f1ce_launcher PRIVATE shell32 ole32 comctl32 uxtheme)
 else()
   find_package(Threads REQUIRED)
-  target_link_libraries(f1ce PRIVATE Threads::Threads)
+  target_link_libraries(f1ce PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+  # native builds (linux/build.sh): libstdc++/libgcc linked in, so the AppImage needs only the build machine's glibc
+  # or newer (the zig cross build links libc++ statically and targets glibc 2.28)
+  if(NOT CMAKE_CROSSCOMPILING)
+    target_link_options(f1ce PRIVATE -static-libstdc++ -static-libgcc)
+  endif()
 endif()

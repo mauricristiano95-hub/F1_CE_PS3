@@ -926,7 +926,13 @@ template <class S> FORCE_INLINE bool spu_pm_call(S& s, bool (*f)(SPUThread&)) {
 template <class S> bool spu_skip_pm_buffers(S& s) { return spu_pm_call(s, spu_pm_buffers); }
 template <class S> bool spu_skip_pm_dma_info(S& s) { return spu_pm_call(s, spu_pm_dma_info); }
 template <class S> bool spu_skip_pm_release(S& s) { return spu_pm_call(s, spu_pm_release); }
-template <class S> bool spu_skip_pm_job_done(S& s) { return spu_pm_call(s, spu_pm_job_done); }
+void spu_pm_job_end(const SPUThread& t);   // spu_pm.cpp: the list of jobs taken and not finished
+template <class S> bool spu_skip_pm_job_done(S& s) {
+    static_assert(std::is_same_v<S, SPUThread>);
+    if (!s.pm_native) return false;
+    spu_pm_job_end(s);
+    return spu_pm_job_done(s);
+}
 template <class S> bool spu_skip_pm_grab(S& s) { return spu_pm_call(s, spu_pm_grab); }
 template <class S> bool spu_skip_pm_irq_enter(S& s) { return spu_pm_call(s, spu_pm_irq_enter); }
 template <class S> bool spu_skip_pm_irq_leave(S& s) { return spu_pm_call(s, spu_pm_irq_leave); }

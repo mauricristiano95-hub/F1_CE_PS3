@@ -115,6 +115,10 @@ struct PPUThread {
     std::condition_variable cv;
 };
 extern thread_local PPUThread* t_self;
+// the main thread's last sys_timer_usleep calls (F1CE_PROFILE only; lv2.cpp)
+struct MainSleep { u64 t; u32 lr, req, took; };
+extern MainSleep g_main_sleeps[256];
+extern std::atomic<u64> g_main_sleep_pos;
 PPUThread* thread_create(u32 entry_opd, u64 arg, s32 prio, u32 stack_size, bool joinable, const std::string& name,
                          u32* out_id);
 PPUThread* thread_find(u32 id);

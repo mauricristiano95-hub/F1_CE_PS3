@@ -16,6 +16,8 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 #include "host.h"
 #include "kernel.h"
@@ -31,6 +33,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <deque>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
@@ -810,9 +813,8 @@ std::atomic<bool> g_pcache_dirty{false};
 std::string vk_cache_dir() {
     static const std::string d = [] {
         std::string p = shader_cache_dir() + "/vk";
-#ifdef _WIN32
-        CreateDirectoryA(p.c_str(), nullptr);
-#endif
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::u8path(p), ec);
         return p;
     }();
     return d;
@@ -2572,7 +2574,9 @@ void method(u32 m, u32 arg) {
     }
 }
 
+u64 g_flip_t0 = 0, g_flip_t1 = 0;
 void flip(u32 ea, u32 pitch, u32 width, u32 height) {
+    g_flip_t0 = time_usec();
     note_display(ea - mem::RSX_LOCAL);
     vk_init_once();
     (void)pitch; (void)width; (void)height;
@@ -2608,20 +2612,32 @@ void flip(u32 ea, u32 pitch, u32 width, u32 height) {
     zpass_resolve();
     for (auto& [k, sf] : g_surfaces)
         if (sf.main_ea) { write_back_pending(&sf); write_back_start(&sf); }
+    g_flip_t1 = time_usec();
     u64 ts = time_usec();
     u32 index = 0;
     VkSemaphore sem = 0;
     heaps_end_frame();
+    u64 tp[5] = {ts};
     if (acquire(&index, &sem)) {
+        tp[1] = time_usec();
         if (shown && (res_scaled() || fxaa_on())) present_pass(*shown, index);
         else present_blit(shown, index);
         submit(sem, g_swap_done[index]);
+        tp[2] = time_usec();
         present(index);
+        tp[3] = time_usec();
     } else {
         submit();
     }
     static u64 flip_serial[2] = {};   // at most two frames in flight
     wait_serial(flip_serial[1]);
+    tp[4] = time_usec();
+    if (tp[4] - g_flip_t0 > 10000 && tp[3]) {   // debug: where a slow flip went
+        static int n = 0;
+        if (n++ < 200)
+            LOG_I("rsx flip slow: %.1f ms | before %.1f heaps %.1f acquire %.1f submit %.1f present %.1f wait %.1f", (tp[4] - g_flip_t0) / 1e3,
+                  (g_flip_t1 - g_flip_t0) / 1e3, (ts - g_flip_t1) / 1e3, (tp[1] - ts) / 1e3, (tp[2] - tp[1]) / 1e3, (tp[3] - tp[2]) / 1e3, (tp[4] - tp[3]) / 1e3);
+    }
     flip_serial[1] = flip_serial[0];
     flip_serial[0] = g_serial - 1;
     g_prof.other += time_usec() - ts;
@@ -2681,7 +2697,8 @@ void flip(u32 ea, u32 pitch, u32 width, u32 height) {
               (unsigned long long)g_draws, g_programs.size(), g_textures.size(), g_surfaces.size(), g_idx_cache.size());
         if (g_pcache_dirty) save_pipeline_cache();
     }
-    if (g_frame % 60 == 0) { evict_index_caches(); evict_raw_regions(); }
+    evict_index_caches(60);
+    if (g_frame % 60 == 0) evict_raw_regions();
 }
 }  // namespace vk
 }  // namespace rsx

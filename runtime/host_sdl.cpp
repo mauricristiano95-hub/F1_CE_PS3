@@ -145,6 +145,9 @@ void ui_thread() {
 }  // namespace
 
 void init() {
+    // (Linux: the app id names the window class / Wayland app id, matched by the launcher's .desktop file, and the
+    // PulseAudio/PipeWire stream)
+    SDL_SetAppMetadata("Formula One: Championship Edition (recompiled)", nullptr, "f1ce-recomp");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
         LOG_E("SDL_Init failed: %s", SDL_GetError());
         return;

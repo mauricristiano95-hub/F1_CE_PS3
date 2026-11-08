@@ -447,6 +447,10 @@ SYS(timer_disconnect_event_queue) {
     t->running = false;
     RET(CELL_OK);
 }
+}  // namespace
+MainSleep g_main_sleeps[256];
+std::atomic<u64> g_main_sleep_pos{0};
+namespace {
 SYS(timer_usleep) {
     {   // debug: F1CE_USLEEP_LOG: requested sleeps per second by size, every 5 s
         static const bool ul = getenv("F1CE_USLEEP_LOG") != nullptr;
@@ -479,8 +483,17 @@ SYS(timer_usleep) {
     // libgcm's wait for the RSX reference (usleep(30) in a loop, 0x4EF074): blocks until the RSX moves it, instead of
     // ~15000 polls per second (F1CE_SPIN_WAIT=1: the old way)
     static const bool old_spin = getenv("F1CE_SPIN_WAIT") != nullptr;
+    const u64 us_start = time_usec();
     if (!old_spin && c.pc == 0x4EF074 && ARG(0) <= 100) rsx_ref_wait();
     else sleep_usec(ARG(0));
+    {   // with F1CE_PROFILE: the main thread's sleeps, for the slow-frame lines of hle_gcm.cpp
+        static const bool prof = getenv("F1CE_PROFILE") != nullptr;
+        if (prof && t_self && t_self->name == "main") {
+            const u64 i = g_main_sleep_pos.load();
+            g_main_sleeps[i % 256] = {us_start, (u32)c.lr, (u32)ARG(0), (u32)(time_usec() - us_start)};
+            g_main_sleep_pos = i + 1;
+        }
+    }
     // keep the PPU at most one ring slot (reference step 2) ahead of a lagging RSX: the main thread paces its frames
     // with usleep, and the game would otherwise rewrite a command list the RSX is still running (hle_gcm.cpp)
     static const bool no_throttle = getenv("F1CE_NO_RSX_THROTTLE") != nullptr;   // debug
