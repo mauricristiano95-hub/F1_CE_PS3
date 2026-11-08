@@ -14,7 +14,9 @@ PadState pad_state();
 void pad_rumble(float low, float high);   // motor strengths 0..1 (low = heavy motor), held until the next call
 void input_clock_reset();   // scripted input times count from this call (end of the start-up shader phase)
 bool quit_requested();
-void audio_push(const float* stereo, u32 frames);   // 48 kHz interleaved stereo
+void request_quit();   // as closing the window (Alt+F4): the game gets CELL_SYSUTIL_REQUEST_EXITGAME and shuts down
+bool audio_push(const float* stereo, u32 frames);   // 48 kHz interleaved stereo; false: dropped (queue full)
+int audio_queued_ms();   // output not yet played, -1 without an audio device
 // Presents a guest framebuffer (A8R8G8B8 big-endian in guest memory). CPU path (no GPU renderer).
 void present(u32 ea, u32 pitch, u32 width, u32 height);
 

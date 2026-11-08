@@ -8,7 +8,9 @@ PadState pad_state() { return {}; }
 void pad_rumble(float, float) {}
 void input_clock_reset() {}
 bool quit_requested() { return false; }
-void audio_push(const float*, u32) {}
+void request_quit() {}
+bool audio_push(const float*, u32) { return true; }
+int audio_queued_ms() { return -1; }
 void present(u32 ea, u32 pitch, u32 width, u32 height) {
     static u32 frames = 0;
     if (++frames % 60 == 1) LOG_I("present #%u: fb %08x %ux%u pitch %u", frames, ea, width, height, pitch);

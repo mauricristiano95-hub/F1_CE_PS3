@@ -4,6 +4,7 @@
 #include "lv2_fs.h"
 #include "rsx.h"
 
+#include <algorithm>
 #include <array>
 #include <deque>
 #include <vector>
@@ -214,11 +215,13 @@ HLE_FUNC(cellUsbdClosePipe) { RET(CELL_OK); }
 // ================================================================== cellAudio
 namespace {
 constexpr u32 AUDIO_PORTS = 8, BLOCK_SAMPLES = 256;
+constexpr double BLOCK_US = BLOCK_SAMPLES * 1e6 / 48000;   // 5.33 ms
 struct AudioPort {
     bool open = false, started = false;
     u32 nchannel = 2, nblock = 8, addr = 0, size = 0;
     float level = 1.0f;
     u64 tag = 0;
+    bool silent_when_due[16] = {};   // per block: nothing written when the read index passed it
 };
 std::mutex g_audio_mutex;
 std::array<AudioPort, AUDIO_PORTS> g_ports;
@@ -227,36 +230,254 @@ u32 g_tag_addr = 0;
 bool g_audio_init = false;
 std::thread g_audio_thread;
 
+bool block_silent(u32 ea, u32 bytes) {
+    const u32* w = (const u32*)gmem(ea);
+    for (u32 i = 0; i < bytes / 4; i++)
+        if (w[i]) return false;
+    return true;
+}
+
+// F1CE_AUDIO_WAV=<file>: the output as a 48 kHz float stereo WAV (sizes in the header updated with each block)
+void wav_write(const float* stereo, u32 frames) {
+    static FILE* wav = [] {
+        const char* e = getenv("F1CE_AUDIO_WAV");
+        FILE* f = e ? fopen(e, "wb") : nullptr;
+        if (f) {
+            const u32 rate = 48000, byte_rate = rate * 8;
+            const u16 fmt = 3 /* IEEE float */, ch = 2, align = 8, bits = 32;
+            const u32 fmt_size = 16, zero = 0;
+            fwrite("RIFF", 1, 4, f); fwrite(&zero, 4, 1, f); fwrite("WAVEfmt ", 1, 8, f); fwrite(&fmt_size, 4, 1, f);
+            fwrite(&fmt, 2, 1, f); fwrite(&ch, 2, 1, f); fwrite(&rate, 4, 1, f); fwrite(&byte_rate, 4, 1, f);
+            fwrite(&align, 2, 1, f); fwrite(&bits, 2, 1, f); fwrite("data", 1, 4, f); fwrite(&zero, 4, 1, f);
+        }
+        return f;
+    }();
+    if (!wav) return;
+    static u32 bytes = 0;
+    fwrite(stereo, sizeof(float), frames * 2, wav);
+    bytes += frames * 8;
+    const u32 riff = bytes + 36;
+    fseek(wav, 4, SEEK_SET);
+    fwrite(&riff, 4, 1, wav);
+    fseek(wav, 40, SEEK_SET);
+    fwrite(&bytes, 4, 1, wav);
+    fseek(wav, 0, SEEK_END);
+}
+
+// The game mixes (Audio_Thread, fn 0xAA4E8, polling about every 1.3 ms) only one or two blocks ahead of the read index:
+// the next block is due 5-11 ms after it is mixed. If the read index gets past its write index it stops mixing until the
+// ring comes round (~35 ms of silence). So:
+// - one block per period, never a burst to catch up after a late wake (a burst runs past the write index): the time is
+//   dropped instead and the SDL queue covers it
+// - the period follows the SDL queue (~30 ms), so the output runs on the device's clock: the queue neither runs dry nor
+//   grows to its limit over a long session (each block dropped there was a 5 ms gap)
+// - a block is copied F1CE_AUDIO_LAG (default 2) periods after the read index passed it, so a mix that comes late still
+//   plays. Safe below nblock - 3: the game writes up to two blocks past the read index, a block 7 behind it the earliest.
 void audio_loop() {
     set_thread_name("audio out");
-    u64 next = time_usec();
+    raise_thread_priority(true);
+    static const u32 lag_env = getenv("F1CE_AUDIO_LAG") ? (u32)atoi(getenv("F1CE_AUDIO_LAG")) : 2;
+    constexpr double TARGET_MS = 30;
+    double next = (double)time_usec(), period = BLOCK_US, queued_avg = TARGET_MS;
     std::vector<float> mix(BLOCK_SAMPLES * 2);
+    struct { u32 late_wakes = 0, rescued = 0, missed = 0, underruns = 0, dropped = 0; double max_late = 0; int qmin = 1 << 30, qmax = -1; } st;
+    u64 window = time_usec(), minute = window;
+    double rate_sum = 0;   // period corrections over the minute: the device's clock against time_usec
+    u32 rate_n = 0;
+    bool pushed = false;
     for (;;) {
-        next += BLOCK_SAMPLES * 1000000ull / 48000;
-        u64 now = time_usec();
-        if (next > now) sleep_usec(next - now);
-        std::fill(mix.begin(), mix.end(), 0.0f);
-        std::lock_guard lk(g_audio_mutex);
-        for (u32 i = 0; i < AUDIO_PORTS; i++) {
-            auto& p = g_ports[i];
-            if (!p.open || !p.started) continue;
-            u32 idx = (u32)ld64(g_read_index_addr + i * 8);
-            u32 block = p.addr + idx * p.nchannel * BLOCK_SAMPLES * 4;
-            for (u32 s = 0; s < BLOCK_SAMPLES; s++) {
-                float l = ldf32(block + (s * p.nchannel) * 4);
-                float r = p.nchannel > 1 ? ldf32(block + (s * p.nchannel + 1) * 4) : l;
-                mix[s * 2] += l * p.level;
-                mix[s * 2 + 1] += r * p.level;
-            }
-            memset(gmem(block), 0, p.nchannel * BLOCK_SAMPLES * 4);
-            p.tag++;
-            st64(g_tag_addr + (i * 16 + idx) * 8, p.tag);
-            st64(g_read_index_addr + i * 8, (idx + 1) % p.nblock);
+        next += period;
+        sleep_until_precise((u64)next);
+        const u64 now = time_usec();
+        if (now > next + BLOCK_US) {
+            st.late_wakes++;
+            st.max_late = std::max(st.max_late, (now - next) / 1000.0);
+            next = (double)now;
         }
-        host::audio_push(mix.data(), BLOCK_SAMPLES);
+        std::fill(mix.begin(), mix.end(), 0.0f);
+        {
+            std::lock_guard lk(g_audio_mutex);
+            for (u32 i = 0; i < AUDIO_PORTS; i++) {
+                auto& p = g_ports[i];
+                if (!p.open || !p.started) continue;
+                const u32 nb = std::min<u32>(p.nblock, 16), bytes = p.nchannel * BLOCK_SAMPLES * 4;
+                const u32 lag = nb > 3 ? std::min(lag_env, nb - 4) : 0;
+                auto block_ea = [&](u32 b) { return p.addr + b % nb * bytes; };
+                const u32 idx = (u32)ld64(g_read_index_addr + i * 8) % nb;
+                // written after its copy (the copy of the last period): too late even with the lag
+                if (lag) {
+                    const u32 prev = (idx + 2 * nb - 1 - lag) % nb;
+                    if (!block_silent(block_ea(prev), bytes)) { st.missed++; memset(gmem(block_ea(prev)), 0, bytes); }
+                }
+                p.silent_when_due[idx] = block_silent(block_ea(idx), bytes);
+                const u32 copy = (idx + nb - lag) % nb, block = block_ea(copy);
+                if (lag && p.silent_when_due[copy] && !block_silent(block, bytes)) st.rescued++;
+                for (u32 s = 0; s < BLOCK_SAMPLES; s++) {
+                    float l = ldf32(block + (s * p.nchannel) * 4);
+                    float r = p.nchannel > 1 ? ldf32(block + (s * p.nchannel + 1) * 4) : l;
+                    mix[s * 2] += l * p.level;
+                    mix[s * 2 + 1] += r * p.level;
+                }
+                memset(gmem(block), 0, bytes);
+                p.tag++;
+                st64(g_tag_addr + (i * 16 + idx) * 8, p.tag);
+                st64(g_read_index_addr + i * 8, (idx + 1) % p.nblock);
+            }
+        }
+        wav_write(mix.data(), BLOCK_SAMPLES);
+        const int q = host::audio_queued_ms();
+        if (pushed && q == 0) st.underruns++;
+        if (!host::audio_push(mix.data(), BLOCK_SAMPLES)) st.dropped++;
+        pushed = true;
+        if (q >= 0) {
+            // (the device takes the queue in chunks of ~10 ms: averaged over ~0.3 s; at most 2% faster or slower)
+            queued_avg += (q - queued_avg) * 0.02;
+            period = BLOCK_US * (1 + std::clamp((queued_avg - TARGET_MS) / TARGET_MS * 0.02, -0.02, 0.02));
+            st.qmin = std::min(st.qmin, q);
+            st.qmax = std::max(st.qmax, q);
+            rate_sum += period / BLOCK_US - 1;
+            rate_n++;
+        }
+        if (now - window >= 10000000) {
+            if (st.late_wakes || st.rescued || st.missed || st.underruns || st.dropped)
+                LOG_I("audio out: 10 s: late wakes %u (max %.1f ms), late mixes %u played (lag), %u lost, queue %d..%d ms, "
+                      "underruns %u, dropped %u", st.late_wakes, st.max_late, st.rescued, st.missed, st.qmin, st.qmax,
+                      st.underruns, st.dropped);
+            st = {};
+            window = now;
+        }
+        // (the old fixed period drifted by this much: its queue filled to the 100 ms limit, then lost a block at intervals)
+        if (now - minute >= 60000000 && rate_n) {
+            LOG_I("audio out: device clock %+.0f ppm, queue %d ms", -rate_sum / rate_n * 1e6, q);
+            rate_sum = 0;
+            rate_n = 0;
+            minute = now;
+        }
     }
 }
 }  // namespace
+
+// F1CE_AUDIO_CMD_LOG=1: commands the sound engine runs (fn 0x5BBB38 dispatch, r11 = command), per second, every 10 s:
+// a command sent from per-frame code doubles with F1CE_60FPS
+// F1CE_AUDIO_CMD_TRACE=<s>[,<len>]: from s seconds after start, len (8) s of the vector commands (67/68: emitter vectors at
+// object +20 and +36, 75-78: the listener matrix rows) and of command 15 (object +24 = x, sent per frame) as CSV in
+// audio_cmds.csv: time, command, object, x, y, z, w (args at r27 + 8)
+void audio_cmd(PPUContext& c) {
+    static const char* trace_env = getenv("F1CE_AUDIO_CMD_TRACE");
+    if (trace_env) {
+        static const u64 from = (u64)(atof(trace_env) * 1e6);
+        static FILE* f = fopen("audio_cmds.csv", "w");
+        const u64 t = time_usec();
+        const u32 cmd = (u32)c.r[11];
+        static const u64 len = strchr(trace_env, ',') ? (u64)(atof(strchr(trace_env, ',') + 1) * 1e6) : 8000000;
+        if (f && t >= from && t < from + len && (cmd == 15 || cmd == 67 || cmd == 68 || (cmd >= 75 && cmd <= 78))) {
+            const u32 a = (u32)c.r[27] + 8;
+            fprintf(f, "%llu,%u,%08x,%08x,%08x,%08x,%08x,%08x\n", (unsigned long long)t, cmd, ld32((u32)c.r[26]), ld32(a - 4),
+                    ld32(a), ld32(a + 4), ld32(a + 8), ld32(a + 12));
+        }
+    }
+    static const bool on = getenv("F1CE_AUDIO_CMD_LOG") != nullptr;
+    if (!on) return;
+    static std::mutex m;
+    static u64 counts[256] = {}, window = time_usec();
+    std::lock_guard lk(m);
+    counts[(u32)c.r[11] & 255]++;
+    const u64 now = time_usec();
+    if (now - window < 10000000) return;
+    std::string line;
+    for (u32 i = 0; i < 256; i++)
+        if (counts[i]) {
+            char b[32];
+            snprintf(b, sizeof(b), " %u:%.1f", i, counts[i] * 1e6 / (now - window));
+            line += b;
+            counts[i] = 0;
+        }
+    LOG_I("audio cmds/s:%s", line.c_str());
+    window = now;
+}
+
+// fn 0x5C8260, r3 = sound source (position at +0x14, velocity at +0x24, fixed point 4096 = 1): from the listener it
+// computes volume, pan and the Doppler pitch, (0x136000 - relative radial speed) / 0x136, and passes them to each voice
+// of the source (virtual +0xC). The game sends it once per frame per source, so with F1CE_60FPS the voices get twice as
+// many pitch changes as on the PS3. F1CE_AUDIO3D_HZ=<n> (experiment): a source is updated at most n times per second
+// (on an n Hz grid: 30 = the original rate). Same window as F1CE_AUDIO_CMD_TRACE: each update as CSV in audio_src.csv:
+// time, source, x, y, z, vx, vy, vz.
+bool audio_src_hook(PPUContext& c) {
+    const u32 s = (u32)c.r[3];
+    const u64 t = time_usec();
+    static const int hz = getenv("F1CE_AUDIO3D_HZ") ? atoi(getenv("F1CE_AUDIO3D_HZ")) : 0;
+    if (hz > 0) {
+        static std::mutex m;
+        static std::unordered_map<u32, u64> last_slot;
+        const u64 slot = t * (u64)hz / 1000000;
+        std::lock_guard lk(m);
+        auto [it, fresh] = last_slot.try_emplace(s, slot);
+        if (!fresh && it->second == slot) return true;   // already updated in this slot: the voices keep their values
+        it->second = slot;
+    }
+    static const char* trace_env = getenv("F1CE_AUDIO_CMD_TRACE");
+    if (!trace_env) return false;
+    static const u64 from = (u64)(atof(trace_env) * 1e6);
+    static FILE* f = fopen("audio_src.csv", "w");
+    static const u64 len = strchr(trace_env, ',') ? (u64)(atof(strchr(trace_env, ',') + 1) * 1e6) : 8000000;
+    if (!f || t < from || t >= from + len) return false;
+    fprintf(f, "%llu,%08x,%d,%d,%d,%d,%d,%d\n", (unsigned long long)t, s, (s32)ld32(s + 0x14), (s32)ld32(s + 0x18),
+            (s32)ld32(s + 0x1C), (s32)ld32(s + 0x24), (s32)ld32(s + 0x28), (s32)ld32(s + 0x2C));
+    return false;
+}
+
+// fn 0x4C6280 (virtual), r3 = a car's engine sound: fills the grain engine input at +0x7C (+0x7C..+0x8C: load,
+// +0x80, rev ratio +0x84, +0x88, +0x8C) and runs the grain engines at +0x74/+0x78 (fn 0x5CF28: rev and gear change
+// filters, all stepped by the constant dt 1/180 at 0x10110804, so per call). Per-call filters here too (+0x60: 0.95/0.05,
+// random load wobble 0.25/0.75). F1CE_AUDIO_CMD_LOG counts its calls; F1CE_ENGINE_SND_HZ=<n> (experiment): each car's
+// engine sound is updated at most n times per second (n Hz grid, 30 = the PS3's rate). Same window as
+// F1CE_AUDIO_CMD_TRACE: the input of each call (the values the previous call left) as CSV in engine_snd.csv: time, object,
+// +0x60, +0x7C, +0x80, +0x84, +0x88, +0x8C.
+bool engine_snd_hook(PPUContext& c) {
+    const u32 s = (u32)c.r[3];
+    const u64 t = time_usec();
+    static const int hz = getenv("F1CE_ENGINE_SND_HZ") ? atoi(getenv("F1CE_ENGINE_SND_HZ")) : 0;
+    if (hz > 0) {
+        static std::mutex m;
+        static std::unordered_map<u32, u64> last_slot;
+        const u64 slot = t * (u64)hz / 1000000;
+        std::lock_guard lk(m);
+        auto [it, fresh] = last_slot.try_emplace(s, slot);
+        if (!fresh && it->second == slot) {   // already updated in this slot: the grain engines keep their state
+            c.r[3] = 0;
+            return true;
+        }
+        it->second = slot;
+    }
+    static const bool log = getenv("F1CE_AUDIO_CMD_LOG") != nullptr;
+    if (log) {
+        static std::mutex m;
+        static std::unordered_map<u32, u32> calls;
+        static u64 window = t;
+        std::lock_guard lk(m);
+        calls[s]++;
+        if (t - window >= 10000000) {
+            std::string line;
+            for (auto& [obj, n] : calls) {
+                char b[32];
+                snprintf(b, sizeof(b), " %08x:%.1f", obj, n * 1e6 / (t - window));
+                line += b;
+            }
+            LOG_I("engine sound updates/s:%s", line.c_str());
+            calls.clear();
+            window = t;
+        }
+    }
+    static const char* trace_env = getenv("F1CE_AUDIO_CMD_TRACE");
+    if (!trace_env) return false;
+    static const u64 from = (u64)(atof(trace_env) * 1e6);
+    static FILE* f = fopen("engine_snd.csv", "w");
+    static const u64 len = strchr(trace_env, ',') ? (u64)(atof(strchr(trace_env, ',') + 1) * 1e6) : 8000000;
+    if (!f || t < from || t >= from + len) return false;
+    fprintf(f, "%llu,%08x,%g,%g,%g,%g,%g,%g\n", (unsigned long long)t, s, ldf32(s + 0x60), ldf32(s + 0x7C),
+            ldf32(s + 0x80), ldf32(s + 0x84), ldf32(s + 0x88), ldf32(s + 0x8C));
+    return false;
+}
 
 HLE_FUNC(cellAudioInit) {
     std::lock_guard lk(g_audio_mutex);

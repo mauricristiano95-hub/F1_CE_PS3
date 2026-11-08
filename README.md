@@ -24,6 +24,7 @@ executable reads your own `PS3_GAME` folder at runtime.
 | `tools/spu_aot.py` | ahead-of-time SPU translation: recorded blocks → C++ in `generated/spu/` (single blocks + linked clusters) |
 | `runtime/hle_spurs.cpp` | host SPURS kernel running the game's SPU policy module |
 | `runtime/spu_pm.cpp` | the job manager policy module's hot functions rewritten in C++ (buffer lists, DMA info, buffer release, job end, job queue, interrupt entry) |
+| `runtime/hle_frontend.cpp` | front-end additions as Lua source run in the game's own Lua state ("QUIT GAME" button), native Lua error unwinding |
 | `runtime/hle_gcm.cpp` | RSX FIFO front end (jumps/calls, semaphores, labels, reports, flips) |
 | `runtime/rsx_gl.cpp` | OpenGL 3.3 renderer: RSX vertex/fragment programs → GLSL, textures, blending |
 | `runtime/host_sdl.cpp` | SDL3 window, keyboard/gamepad input, audio output |
@@ -133,6 +134,7 @@ are kept on a Deck too.
 | `tools/race_test.sh <name> [VAR=value ...]` | Quick Race test in `dbg/<name>`, booted with `F1CE_SKIP_INTRO=1` (English); quits `QUIT_AFTER` (default 10) s after the race scene appears |
 | `F1CE_QUIT_AFTER_3D=<s>` | exits that many seconds after the first frame with 800+ draws (saves the last frame) |
 | `F1CE_QR_TRACK`, `F1CE_QR_DRIVER`, `F1CE_QR_DISTANCE`, `F1CE_QR_WEATHER`, `F1CE_QR_AI`, `F1CE_QR_FUEL`, `F1CE_QR_DAMAGE`, `F1CE_QR_FAILURES`, `F1CE_QR_PENALTIES` | Quick Race settings regardless of the menu (`runtime/hle_quickrace.cpp`; the launcher's "Quick Race Settings" tab): track folder name (`hungary`) or calendar index 0-17, driver id/surname/code (`heidfeld`, `HEI`; the team follows), distance 10/20/30/50/75/100, weather variable/sunny/cloudy/lightrain/heavyrain, AI easy/medium/hard, fuel and tyre wear off/scaled/realistic, damage/failures/penalties 0/1. Applied until the race's 3D scene, so `tools/race_test.sh` (cross only) reaches any combination; the menu keeps showing its own choices, and a setting changed in the menu (a value change within 2 s of a d-pad/stick move) is left to the menu from then on |
+| `F1CE_LUA_PRINT=1`, `F1CE_LUA_LOG=1`, `F1CE_LUA_PATCH=<file>` | front-end Lua (`runtime/hle_frontend.cpp`): log the scripts' `print` output (a stub in the retail game), log every script load, run a Lua file instead of the built-in patch after each script the loader runs |
 | `F1CE_SKIP_INTRO=1`, `F1CE_LANGUAGE=<name>` | starts at the "Press Start" screen: no language menu, no Studio Liverpool / SCE logos, no intro movie (`runtime/hle_boot.cpp`; launcher: General tab). The language is `english` (default), `french`, `german`, `italian`, `spanish`, `portuguese` or `finnish`; without the skip it is only the one the language menu starts on |
 | `F1CE_QR_POKE=<offset>:<hex>` | experiment: writes a word into the Quick Race settings object until the race (+0x08 and +0x18 showed no effect in single runs, +0x10 = 4 crashes; an early "+0x08 changes the grid size" came from parallel runs taking another menu path) |
 | `F1CE_TICK_DUMP=<s>,<ea hex>,<size hex>[,<ea>,<size>...]` | with `F1CE_60FPS`: <s> seconds into the first 3D scene, saves that guest memory on 32 (`F1CE_TICK_DUMP_FRAMES`) consecutive frames (`tick_<k>.bin`, further ranges `tick_<k>_<ea>.bin`), to find values that swing from tick to tick; keep it small (large dumps slow frames to 2 ticks) |
@@ -152,11 +154,17 @@ are kept on a Deck too.
 | `F1CE_SPU_NOCULL=1` | the geometry jobs keep all triangles: SPU workers ~80% -> ~56% busy, but the renderer gets ~1000 more draws and 8x the indices, so fps drop (see the progress log) |
 | `F1CE_FPS_CAP=<n>` | with `F1CE_60FPS`: frames of at least 1/n s (launcher: "Frame rate cap"). 30 = two ticks per frame as the original, with this mode's pacing; holds 30 on machines where the original 30 fps mode dips (Steam Deck class) |
 | `F1CE_SHAKE_FILTER=0` | with `F1CE_60FPS`: turns off the shake filter (then the old 30 fps hold for a standing car applies) |
+| `F1CE_SHAKE_RANGE=<lo hex>,<hi hex>` | debug: the shake filter only touches that part of the car object (to bisect side effects) |
 | `F1CE_SPIN_WAIT=1`, `F1CE_TASK_THREADS=1`, `F1CE_PRIO=0` | the waits, SPURS task threads and thread priorities as before 2026-11-06 (spinning waits, a new thread per task, all at normal priority): A/B comparisons |
 | `F1CE_CPUS=<n>` | runs on the first n logical processors only (Windows), to estimate smaller machines: 8 = 4 cores / 8 threads like a Steam Deck (whose cores are slower) |
 | `F1CE_THREAD_CPU=1` | with the `cpu:` line every 5 s: the cores each thread used (threads are named) |
 | `F1CE_TICKS_FIXED=1` | with `F1CE_60FPS`: exactly one tick per frame whatever the time (with frame dumps, to see per-tick motion) |
 | `F1CE_USLEEP_LOG=1` | `sys_timer_usleep` requests per second by size, and the callers of short ones |
+| `F1CE_AUDIO3D_HZ=<n>` | experiment: each 3D sound source (volume, pan, Doppler; fn 0x5C8260) is updated at most n times per second, on an n Hz grid (30 = the PS3's rate; the game sends one update per frame, so 60 with `F1CE_60FPS`). Launcher field |
+| `F1CE_ENGINE_SND_HZ=<n>` | experiment: each car's engine sound (fn 0x4C6280, grain engine inputs and update, normally once per 256-sample mix block = 187.5/s) runs at most n times per second. Launcher field |
+| `F1CE_AUDIO_CMD_LOG=1`, `F1CE_AUDIO_CMD_TRACE=<s>[,<len>]` | sound engine commands run per second and engine sound updates per car (every 10 s); trace of the vector commands (67/68 emitter position/velocity, 75-78 listener matrix) and command 15 (a per-frame triangle sweep, object +0x18) to `audio_cmds.csv`, of every 3D source update to `audio_src.csv` and of each car's grain engine input (+0x60, +0x7C..+0x8C) to `engine_snd.csv`, from s seconds after start for len seconds (default 8) |
+| `F1CE_AUDIO_WAV=<file>` | records the audio output (what goes to SDL) as a 48 kHz float stereo WAV, to compare runs |
+| `F1CE_AUDIO_LAG=<n>` | cellAudio copies a block n periods (5.33 ms each) after the read index passed it, so a late mix by the game still plays (default 2, at most nblock - 4; 0: copied when due, as before 2026-11-08). `audio out:` log lines count late wakes, late mixes played and lost, queue level, underruns and drops (every 10 s when any occurred) and the device clock (every minute) |
 | `F1CE_PIN=0/1` | thread placement with 12+ logical processors (Windows). Default: the renderer prefers a core of its own (ideal processor, not a hard pin: pinned, it was sometimes held off for 10-30 ms and frames missed their vblank). 0: all threads left to the system; 1: the main PPU thread gets a core too |
 | `F1CE_CACHE_DIR=<dir>` | shader cache folder instead of `shader_cache/` next to the executable (set by the Linux launcher: the AppImage is read-only) |
 | `F1CE_NO_LOG=1` | no `f1ce_recomp.log` (launcher: "No log file"); info lines are dropped before formatting, warnings and errors still go to the console |
@@ -1191,3 +1199,77 @@ banks, then waits for SPU work.
   - Not related: a tester's crash at the first race load on Vulkan / Intel UHD Graphics
     (`TEST_LOGS/f1ce_recomp_crash_on_racestart.log`, 70 s, 6 AsyncRender threads) is `vkWaitSemaphores` timing out
     after 5 s (VK_TIMEOUT) on a submitted serial: the GPU did not finish the first race frames. Open; OpenGL advised.
+- **Audio timing with 60 fps (2026-11-08):**
+  - User report: other cars' and external sounds broken at 60 fps, worse after a long session, fine at 30 fps.
+  - The game's mixer (Audio_Thread, guest prio 100; fn 0xAA4E8 every ~1.3 ms: `usleep(1333)`) compares the cellAudio read
+    index with its write index (+0x106CC) and mixes until it is two blocks ahead: the next block is due 5-11 ms after it
+    is mixed. If the read index gets past the write index, the distance taken mod 8 is above 1 and it mixes nothing
+    until the ring comes round (~35 ms of silence). Its per-tick update (fn 0xA0908) runs in the tick loop of 0x2494A4,
+    so the game side does not follow the frame rate there.
+  - Our side was fragile in exactly that window: the output thread at normal priority (below main and the SPU workers,
+    ABOVE_NORMAL), `sleep_for` (~2 ms late on Windows), a burst of blocks after a late wake (which runs past the
+    game's write index), a fixed period with no relation to the device clock and an SDL queue near empty (gaps on each
+    late wake), and Audio_Thread itself at normal priority under main. 60 fps loads the CPU more, so all of these occur
+    more often.
+  - Changes (`hle_misc.cpp` audio_loop): precise sleep at HIGHEST priority; one block per period, the time of a late
+    wake dropped instead of a burst; the period follows the SDL queue (target 30 ms, at most 2% faster or slower); blocks
+    copied two periods late (`F1CE_AUDIO_LAG`); SDL limit raised from 100 to 250 ms as a backstop. PPU threads with
+    guest priority 100 or better (Audio_Thread, AsyncRender) get main's host priority (`core.cpp` thread_body).
+  - Quick races, 2.5 min each on this machine: 60 fps and 30 fps both had no late wakes and no lost mixes, one late mix
+    per run played thanks to the lag, queue 25-36 ms, device clock ~0 ppm against the host clock. The fault did not
+    show on this machine in that time, so the user still has to test the long 60 fps session. If the sound is still
+    wrong while the `audio out:` lines stay clean, the cause is in the game's sound code at 60 fps (per-frame 3D or
+    grain engine updates), not in buffering.
+  - User test (Quick Race Silverstone, 60 fps): still broken, most audible during the pit stop when cars pass the
+    finish line. Its `audio out:` lines were clean (no lost mixes, underruns or drops, queue 26-34 ms, device clock
+    +237 ppm), so buffering is ruled out. Also ruled out: the 8-channel port (channels 2-7 stay silent: the game follows
+    the stereo output state) and clipping (peaks below 1.0 at 30 and 60 fps alike). Other cars use the grain engine
+    (`Audio/grainengine/<team>_external`, code around 0x5B000-0x5F000). Not found yet: which of its updates runs per
+    frame. `F1CE_AUDIO_WAV` added to record the same moment at 30 and 60 fps.
+  - User: the sound crackles at times, and the pitch is affected too. Sound engine ("AudioEE", 0x5B0000-0x5D0000): the game
+    queues commands that Audio_Thread runs (fn 0x5BBB38, jump table 0x5BBBD0, ~100 commands, probe at 0x5BBBB4). Counted
+    per second, every 3D command follows the frame rate: 75-78 (listener matrix rows: two axes, position, velocity) once per
+    frame, 67/68 (emitter position at +0x14 / velocity at +0x24) and 62 (3D update of a source, fn 0x5C8260) per source per
+    frame. Vectors are fixed point, 4096 = 1.
+  - fn 0x5C8260 finds the nearest listener, then distance attenuation, pan and the Doppler pitch
+    `(0x136000 - ((v_listener - v_source) . dir >> 12)) / 0x136` (speed of sound 310), passed to each voice of the source
+    (virtual +0xC). The listener velocity is the player car's velocity from the frame before.
+  - Traced positions and velocities (quick races, the player driving and the player left on the grid while the field
+    passes) are clean at 60 fps: velocity = movement per tick (x 60 per 1-tick frame, x 30 per 2-tick frame), smooth,
+    with no jitter beyond the car's real acceleration. So the Doppler inputs are correct. What does change: each voice
+    gets a new volume/pan/pitch 60 times a second instead of 30. If a voice steps or crossfades on each change, that
+    doubles the steps during a fast pass-by. `F1CE_AUDIO3D_HZ=30` puts the source updates back on a 30 Hz grid (checked:
+    29.9 updates/s per source at 60 fps, race and audio unaffected); to be judged by ear in the pit stop scene.
+  - User: `F1CE_AUDIO3D_HZ=30` changed nothing; recordings of the pit stop at 30 and 60 fps
+    (`REFERENCE/CAPTURE_PITSTOP_AUDIO_BUG`). Spectrograms: at 30 fps the passing cars are clean harmonic lines with smooth
+    Doppler sweeps, at 60 fps the same harmonics are smeared (fast pitch wobble), no dropouts in either.
+  - Command 15 (object +0x18 = value) also doubles with the frame rate, but its objects are slow triangle sweeps (0..32678,
+    163 per frame), not engine sounds. The engine sound of a car is fn 0x4C6280 (virtual), run by the audio thread once
+    per mix block (187.5/s at both rates): it pops one entry of the car's sound ring (car +0x1170, 16 x 32 bytes, read
+    index +0x1374, `0x10F444` pushes one per physics substep: +0x14 revs, +0x18 throttle, +0x1C) and feeds the grain
+    engine update fn 0x5CF28 (dt constant 1/180 at 0x10110804).
+  - Traced grain engine inputs (`engine_snd.csv`): at 60 fps the AI cars' throttle jumped 0 <-> 1 and the rev ratio
+    zig-zagged while braking (7.6 throttle and 7.2 rev reversals per second per car, against 2.9 / 0.14 at 30 fps).
+    `F1CE_SHAKE_FILTER=0` brought them back to 2.5 / 0.09; bisected with `F1CE_SHAKE_RANGE` to 0x1110-0x1250: the shake
+    filter treated the sound ring as car state and wrote filtered mixtures of unrelated ring entries between ticks, which
+    the audio thread then played. Fix (`hle_physics.cpp`): the ring (0x1170-0x1370) is not filtered. After: 2.7 / 0.11 at
+    60 fps with the filter on. Not yet confirmed by the user's ear.
+- **"QUIT GAME" button in the menus (2026-11-08):**
+  - User request: a QUIT GAME entry at the bottom centre of the menus, in the game's font, chosen with the pad, closing
+    the game like Alt+F4. It is drawn by the navigation bar (between BACK and SELECT, same pen as those labels); moving
+    past the last item of a menu (or Up from the first) gives it the focus (the game's red chevrons on both sides, the
+    menu's cursor hidden), Up/Down leave it, SELECT calls `os.exit`, which the runtime turns into the window-close
+    shutdown (CELL_SYSUTIL_REQUEST_EXITGAME, "Shut Down Complete", exit 0). Text menus and config menus (options);
+    screens without a menu (tables, notices) show the label but cannot focus it. Only the 2D front end: not over a 3D
+    scene (garage, race pause menus), which the script asks with `os.getenv("F1CE_SCENE3D")` (hooked, >= 800 draws). German/French/Italian/Spanish/Finnish/Portuguese labels from `game.language()`.
+  - Done as Lua source: the game links the Lua 5.0/5.1-work parser, so `runtime/hle_frontend.cpp` compiles its patch with
+    `luaL_loadbuffer` (0x5A3CF8) after each script the loader (0x7521C) runs. The patch wraps methods of the shared menu
+    classes (`gClassTextMenu`, `gClassConfigMenu`, made true globals by the engine's `xmove`) and `NavigationButtons.onRender`
+    (found through `getfenv` of a NavigationBars.lua function; screen scripts run in their own environments).
+  - Lua errors use setjmp/longjmp, which translated code cannot do (longjmp returned to its caller): `luaD_rawrunprotected`
+    (0x58DE18) and `luaD_throw` (0x58DDA4) now run on host exceptions, so `pcall` works; an unprotected error is logged
+    before the game's panic exit (the engine calls pad handlers unprotected).
+  - Pitfalls: the parser allows at most 16 operators in one expression chain; host code must keep Lua stack positions as
+    indices (`lua_gettop`/`lua_settop`), since running Lua can reallocate the thread's stack (a saved `L->top` corrupted
+    the engine's next push much later and sent the bisection after unrelated causes); MainMenu animates its picture from
+    `mPreviousMenuItem`, which is 0 until the first real move, so the focus step sets it as a move does.

@@ -35,6 +35,7 @@ set(RUNTIME_SOURCES
   runtime/hle_joblist.cpp
   runtime/hle_quickrace.cpp
   runtime/hle_boot.cpp
+  runtime/hle_frontend.cpp
   runtime/hle_physics.cpp
   runtime/hle_rumble.cpp
   runtime/hle_gcm.cpp

@@ -190,6 +190,8 @@ Field g_fields[] = {
     {L"F1CE_QUIT_AFTER_3D", DEV_VALUES2, L"Exits that many seconds after the first 3D scene (saves the last frame)."},
     {L"F1CE_INPUT", DEV_VALUES2, L"Scripted pad presses, e.g. 9:start,13:cross (seconds since start)."},
     {L"F1CE_INPUT_RECORD", DEV_VALUES2, L"File: records the player's input in F1CE_INPUT syntax."},
+    {L"F1CE_AUDIO3D_HZ", DEV_VALUES2, L"Updates/s: each 3D sound source (volume, pan, Doppler) at most n times a second (30 = PS3)."},
+    {L"F1CE_ENGINE_SND_HZ", DEV_VALUES2, L"Updates/s: each car's engine sound (grain engine) at most n times a second."},
 };
 // any other variables, NAME=value separated by spaces
 const wchar_t* const EXTRA_KEY = L"extra";

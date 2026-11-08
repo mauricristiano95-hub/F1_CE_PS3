@@ -50,6 +50,10 @@ bool shake_filter_on() {
 
 namespace {
 constexpr u32 CAR_SIZE = 0x1390;
+// Not filtered: the engine sound ring (16 entries of 32 bytes, one pushed per substep by 0x10F444; write index +0x1370,
+// read index +0x1374), which the audio thread reads between ticks (0x4C6280, 187.5 times a second). Filtering its
+// entries mixed unrelated samples: the other cars' throttle and revs chattered at 60 fps (pit stop sound, 2026-11-08).
+constexpr u32 SOUND_RING = 0x1170, SOUND_RING_END = 0x1370;
 struct ShakeCar {
     u32 car = 0;
     int substeps = 0;                 // substeps seen in this tick
@@ -91,7 +95,15 @@ void shake_apply() {
         }
         if (s.substeps < 2) continue;
         auto be = [](const u8* p) { u32 v; memcpy(&v, p, 4); return __builtin_bswap32(v); };
-        for (u32 q = 0; q < CAR_SIZE; q += 16) {
+        static u32 q_lo = 0, q_hi = CAR_SIZE;   // debug: F1CE_SHAKE_RANGE=<lo hex>,<hi hex> filters only that part
+        static const bool range = [] {
+            const char* e = getenv("F1CE_SHAKE_RANGE");
+            if (e && strchr(e, ',')) { q_lo = (u32)strtoul(e, nullptr, 16); q_hi = (u32)strtoul(strchr(e, ',') + 1, nullptr, 16); }
+            return e != nullptr;
+        }();
+        (void)range;
+        for (u32 q = q_lo & ~15u; q < q_hi && q < CAR_SIZE; q += 16) {
+            if (q >= SOUND_RING && q < SOUND_RING_END) continue;
             u32 a[4], b[4], c3[4];
             bool ok = true, changed = false;
             for (int k = 0; k < 4; k++) {

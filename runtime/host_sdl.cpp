@@ -278,12 +278,19 @@ PadState pad_state() {
 }
 
 bool quit_requested() { return g_quit; }
+void request_quit() { g_quit = true; }
 
-void audio_push(const float* stereo, u32 frames) {
-    if (!g_audio) return;
-    // keep latency bounded: drop if more than ~100 ms is already queued
-    if (SDL_GetAudioStreamQueued(g_audio) > 48000 * 8 / 10) return;
+bool audio_push(const float* stereo, u32 frames) {
+    if (!g_audio) return true;
+    // (cellAudio paces itself on audio_queued_ms; this only bounds the latency if that fails: more than 250 ms queued)
+    if (SDL_GetAudioStreamQueued(g_audio) > 48000 * 8 / 4) return false;
     SDL_PutAudioStreamData(g_audio, stereo, (int)(frames * 2 * sizeof(float)));
+    return true;
+}
+
+int audio_queued_ms() {
+    if (!g_audio) return -1;
+    return SDL_GetAudioStreamQueued(g_audio) / (48 * 8);   // (bytes: 48 frames of 8 bytes per ms)
 }
 
 static u32 g_dump_count = 0;

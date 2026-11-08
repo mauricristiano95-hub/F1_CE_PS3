@@ -705,6 +705,9 @@ static void thread_body(PPUThread* t) {
     t_self = t;
     set_thread_name(("ppu " + t->name).c_str());
     if (t->id == 0x01000000) { place_thread(1); raise_thread_priority(); }
+    // a thread the game ranks well above main (Audio_Thread 100, AsyncRender 10; main is 1001) is not left below it: at
+    // normal priority the audio mixer was held off by main and the SPU workers and missed its 5 ms blocks
+    else if (t->priority <= 100) raise_thread_priority();
     try {
         call_indirect(t->ctx, t->ctx.pc);
         t->exit_status = t->ctx.r[3];
@@ -854,17 +857,17 @@ void place_thread(int kind) {
 
 // Threads on the frame's critical path (the main PPU thread, SPURS task threads: main waits for their flags) run above
 // the SPU workers' priority, so on a machine with fewer cores than busy threads they are not queued behind a worker.
-// F1CE_PRIO=0: all at normal priority.
-void raise_thread_priority() {
+// highest: the audio output thread, which sleeps nearly all the time but must wake on time. F1CE_PRIO=0: all at normal priority.
+void raise_thread_priority(bool highest) {
 #ifdef _WIN32
     static const bool off = getenv("F1CE_PRIO") && getenv("F1CE_PRIO")[0] == '0';
-    if (!off) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+    if (!off) SetThreadPriority(GetCurrentThread(), highest ? THREAD_PRIORITY_HIGHEST : THREAD_PRIORITY_ABOVE_NORMAL);
 #else
     // a lower nice value for this thread only; refused without CAP_SYS_NICE or an RLIMIT_NICE allowance (the usual
     // desktop and SteamOS case): then every thread stays at the same priority
     static const bool off = getenv("F1CE_PRIO") && getenv("F1CE_PRIO")[0] == '0';
     if (off) return;
-    if (setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), -5) != 0) {
+    if (setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), highest ? -10 : -5) != 0) {
         static std::atomic<bool> warned{false};
         if (!warned.exchange(true)) LOG_I("thread priority: not raised (no permission), all threads at normal priority");
     }
