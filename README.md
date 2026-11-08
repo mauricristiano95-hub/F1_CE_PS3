@@ -1253,7 +1253,7 @@ banks, then waits for SPU work.
     `F1CE_SHAKE_FILTER=0` brought them back to 2.5 / 0.09; bisected with `F1CE_SHAKE_RANGE` to 0x1110-0x1250: the shake
     filter treated the sound ring as car state and wrote filtered mixtures of unrelated ring entries between ticks, which
     the audio thread then played. Fix (`hle_physics.cpp`): the ring (0x1170-0x1370) is not filtered. After: 2.7 / 0.11 at
-    60 fps with the filter on. Not yet confirmed by the user's ear.
+    60 fps with the filter on. Confirmed by the user by ear (pit stop, 60 fps).
 - **"QUIT GAME" button in the menus (2026-11-08):**
   - User request: a QUIT GAME entry at the bottom centre of the menus, in the game's font, chosen with the pad, closing
     the game like Alt+F4. It is drawn by the navigation bar (between BACK and SELECT, same pen as those labels); moving

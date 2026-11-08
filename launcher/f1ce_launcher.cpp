@@ -122,7 +122,7 @@ Check g_checks[] = {
     {L"Start in full screen (F11 toggles it)", L"F1CE_FULLSCREEN", VIDEO},
     {L"Stretch to the window instead of keeping the aspect ratio", L"F1CE_STRETCH", VIDEO},
     {L"Up to 60 fps (game speed unchanged)", L"F1CE_60FPS", GAME,
-     L"Experimental:|flashing shadows, odd pit stop animations and audio, broken replay and ghost car behaviour. "
+     L"Experimental:|flashing shadows, odd pit stop animations, broken replay and ghost car behaviour. "
      L"Turn it off if anything goes wrong."},
     {L"Skip the language menu and the intro (start at Press Start)", L"F1CE_SKIP_INTRO", GAME},
     {L"No log file (keep it off when reporting a bug)", L"F1CE_NO_LOG", GAME},
