@@ -2934,9 +2934,7 @@ void flip(u32 ea, u32 pitch, u32 width, u32 height) {
                 LOG_I("rsx: programs: %llu compiled, %llu from the disk cache, %.0f ms total", (unsigned long long)g_compiled,
                       (unsigned long long)g_cache_hits, g_compile_us / 1000.0);
                 LOG_I("rsx: F1CE_QUIT_AFTER_3D reached at frame %llu, exiting", (unsigned long long)g_frame);
-                fflush(stdout);
-                fflush(stderr);
-                _exit(0);
+                process_exit(0);
             }
         }
     }

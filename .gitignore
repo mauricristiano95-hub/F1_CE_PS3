@@ -16,6 +16,7 @@ generated/*
 
 # Build trees, including the shader cache in build-win/
 build*/
+pgo/raw/
 third_party/
 __pycache__/
 *.pyc

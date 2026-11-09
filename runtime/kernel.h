@@ -124,6 +124,7 @@ PPUThread* thread_create(u32 entry_opd, u64 arg, s32 prio, u32 stack_size, bool 
 PPUThread* thread_find(u32 id);
 void thread_start(PPUThread* t);
 [[noreturn]] void thread_exit(PPUContext& c, u64 status);
+[[noreturn]] void process_exit(int code);   // flushes the logs and leaves at once (no static destructors)
 void run_main_thread(u32 entry_opd, u32 stack_size, s32 prio);
 
 // Thrown to unwind a guest thread's host stack on sys_ppu_thread_exit.

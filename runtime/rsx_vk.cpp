@@ -2686,9 +2686,7 @@ void flip(u32 ea, u32 pitch, u32 width, u32 height) {
                 dump_surface(0x740000, "_quit");
                 LOG_I("rsx: F1CE_QUIT_AFTER_3D reached at frame %llu, exiting", (unsigned long long)g_frame);
                 if (g_pcache_dirty) save_pipeline_cache();
-                fflush(stdout);
-                fflush(stderr);
-                _exit(0);
+                process_exit(0);
             }
         }
     }

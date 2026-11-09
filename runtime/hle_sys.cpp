@@ -52,7 +52,13 @@ HLE_FUNC(sys_process_is_stack) {
 }
 // leaves at once: std::exit ran the static destructors while the other guest threads (SPU workers, renderer) were
 // still running, and they faulted on freed state (access violations in the log after every quit)
+#ifdef F1CE_PGO_GEN
+extern "C" int __llvm_profile_write_file(void);
+#endif
 [[noreturn]] void process_exit(int code) {
+#ifdef F1CE_PGO_GEN
+    __llvm_profile_write_file();   // PGO training build: _Exit skips the profile runtime's atexit writer
+#endif
     std::fflush(nullptr);   // the log file is buffered
     std::_Exit(code);
 }

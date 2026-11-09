@@ -55,6 +55,22 @@ SPU code runs through translated C++ where available (`generated/spu/`, kept in 
 the game executes that are not translated yet, run with `F1CE_SPU_DUMP_BLOCKS=<file>` and then
 `python -I tools/spu_aot.py <file>` (blocks already translated are kept), and rebuild.
 
+Optimised release build (PGO + ThinLTO, Windows; +4% fps on the grid, 2026-11-09):
+
+```sh
+cmake -S . -B build-pgo-gen -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/windows-llvm-mingw.cmake -DF1CE_VULKAN=ON -DF1CE_PGO=GEN
+cmake --build build-pgo-gen -j 12 --target f1ce
+sh tools/pgo_train.sh                      # 6 scripted races (~8 min) -> pgo/f1ce.profdata
+cmake -S . -B build-pgo -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/windows-llvm-mingw.cmake -DF1CE_VULKAN=ON -DF1CE_PGO=USE -DF1CE_LTO=ON
+cmake --build build-pgo -j 12 --target f1ce
+```
+
+The training build writes its profile in `process_exit` (the game leaves with `_Exit`, which skips the profile
+runtime's own writer). `F1CE_PGO_SKIP` lists generated files left uninstrumented: their giant functions took hours to
+compile with instrumentation. A stale profile still works (changed functions just lose it), but retrain after large
+changes to recomp.py or the runtime. `build-pgo` has no shader cache of its own: copy `build-win/shader_cache` next
+to it or set `F1CE_CACHE_DIR`.
+
 `F1CE_HOST` selects the platform backend (`SDL` default, `NULL` = headless).
 `-DF1CE_TRACE_PC=ON` (off by default since 2026-10-31) records the guest PC of memory accesses for crash reports and
 enables `F1CE_WATCH_LINE` on PPU stores; without it crash reports give the function and LR only.
