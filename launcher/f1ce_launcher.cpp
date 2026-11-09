@@ -560,6 +560,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     wc.lpfnWndProc = wnd_proc;
     wc.hInstance = inst;
     wc.hCursor = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);
+    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(101));   // f1ce_launcher.rc: title bar, taskbar and Alt+Tab
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
     wc.lpszClassName = L"F1CELauncher";
     RegisterClassW(&wc);

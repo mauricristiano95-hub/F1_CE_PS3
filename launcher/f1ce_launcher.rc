@@ -1,1 +1,41 @@
+// Resources of the launcher: application icon (window and Explorer), version information (Properties > Details; also
+// what Windows Defender's heuristics look at: an unsigned exe without any metadata that starts another exe looks like a
+// dropper, see the 0.1.1 false positive) and the common-controls / DPI manifest.
+#include <windows.h>
+
+#define F1CE_LAUNCHER_ICON 101
+F1CE_LAUNCHER_ICON ICON "f1ce_launcher.ico"
+
+#define F1CE_VERSION       0,1,2,0
+#define F1CE_VERSION_STR   "0.1.2.0"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     F1CE_VERSION
+PRODUCTVERSION  F1CE_VERSION
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "F1 CE recompilation project"
+            VALUE "FileDescription",  "Formula One: Championship Edition (PS3 recompilation) launcher"
+            VALUE "FileVersion",      F1CE_VERSION_STR
+            VALUE "InternalName",     "f1ce_launcher"
+            VALUE "LegalCopyright",   "Launcher of a static recompilation for personal use; game data is the owner's own copy"
+            VALUE "OriginalFilename", "f1ce_launcher.exe"
+            VALUE "ProductName",      "F1 Championship Edition recompilation"
+            VALUE "ProductVersion",   F1CE_VERSION_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
+
 1 24 "f1ce_launcher.manifest"
