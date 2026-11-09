@@ -2389,6 +2389,7 @@ void spu_aot_09962dab6169f7f2(SPUThread& __restrict s) {
 void spu_aot_09996a7c054f8ada(SPUThread& __restrict s) {
 	const u64 cw = s.code_writes;
 	for (u32 it = 0; ; it++) {
+		if (spu_skip_tri_search(s)) return;
 		s.pc = 0x04824; op_a(s, 0x18028502u);
 		s.pc = 0x04828; op_a(s, 0x18028102u);
 		s.pc = 0x0482C; op_shli(s, 0x0F610102u);

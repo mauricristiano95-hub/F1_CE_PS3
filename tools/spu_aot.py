@@ -33,6 +33,7 @@ IDIOMS = {(0x04AE4, 0x38944402, 7): "spu_idiom_fill_word",
 # optional shortcuts at a block's head: the helper returns true after setting pc to where to continue
 SKIPS = {(0x0D7F8, 0x4020007F, 134): "spu_skip_triangle_cull",
          (0x0D628, 0x7A8FDCBF, 44): "spu_skip_vertex_transform",
+         (0x04824, 0x18028502, 43): "spu_skip_tri_search",   # the rain job's triangle search
          # job manager policy module: functions rewritten natively (runtime/spu_pm.cpp)
          (0x019F8, 0x42810182, 16): "spu_skip_pm_buffers",
          (0x02D48, 0x1C000302, 15): "spu_skip_pm_dma_info",

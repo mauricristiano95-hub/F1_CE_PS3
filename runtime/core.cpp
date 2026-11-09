@@ -908,7 +908,7 @@ void profile_register_thread() {
 }
 #ifdef _WIN32
 // Profiling aid (F1CE_HOST_PROFILE=<seconds before start>): samples the host instruction pointer of every thread
-// of the process for 10 s and logs the hottest functions (resolved through build-win/f1ce.map).
+// of the process for 10 s and logs the hottest functions (resolved through the f1ce.map next to the exe).
 void start_host_profiler() {
     const char* e = getenv("F1CE_HOST_PROFILE");
     if (!e) return;
@@ -971,7 +971,14 @@ void start_host_profiler() {
         LOG_I("host profile: %llu samples", (unsigned long long)total);
         // resolve: map file lines "address size align out in symbol" (symbols are the lines with 4+ fields)
         std::vector<std::pair<u64, std::string>> syms;
-        if (FILE* f = fopen("../../build-win/f1ce.map", "r")) {
+        std::string map_path = "f1ce.map";   // the map the linker wrote next to this exe (build-win, build-pgo, ...)
+        {
+            char path[MAX_PATH];
+            DWORD n = GetModuleFileNameA(nullptr, path, MAX_PATH);
+            std::string s = n && n < MAX_PATH ? std::string(path, n) : std::string();
+            if (size_t slash = s.find_last_of("\\/"); slash != std::string::npos) map_path = s.substr(0, slash + 1) + "f1ce.map";
+        }
+        if (FILE* f = fopen(map_path.c_str(), "r")) {
             char line[1024];
             while (fgets(line, sizeof(line), f)) {
                 unsigned long long a, sz;

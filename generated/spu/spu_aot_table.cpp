@@ -2105,6 +2105,7 @@ void spu_aot_9114a025c0c4998e(SPUThread&);
 void spu_aot_911505a2c90f99a8(SPUThread&);
 void spu_aot_911bc686ac45cf35(SPUThread&);
 void spu_aot_9121c00f8d9fb098(SPUThread&);
+void spu_aot_913b8b540cd5c5dd(SPUThread&);
 void spu_aot_916f826901a040c2(SPUThread&);
 void spu_aot_91817432be4abb56(SPUThread&);
 void spu_aot_9188f82830dfc742(SPUThread&);
@@ -4299,7 +4300,7 @@ void spu_aotc_598(SPUThread&);
 void spu_aotc_599(SPUThread&);
 void spu_aotc_600(SPUThread&);
 void spu_aotc_601(SPUThread&);
-const SpuAotBlock g_spu_aot[3696] = {
+const SpuAotBlock g_spu_aot[3697] = {
 	{0x000c2f86a29d1d47ull, spu_aot_000c2f86a29d1d47, -1},
 	{0x001712bab408ed32ull, spu_aot_001712bab408ed32, 35},
 	{0x001d12fcdf73d18cull, spu_aot_001d12fcdf73d18c, -1},
@@ -4761,7 +4762,7 @@ const SpuAotBlock g_spu_aot[3696] = {
 	{0x1f5969dbf4f57c50ull, spu_aot_1f5969dbf4f57c50, -1},
 	{0x1f8ff83e516a9ca4ull, spu_aot_1f8ff83e516a9ca4, -1},
 	{0x1f95a365f235de82ull, spu_aot_1f95a365f235de82, 87},
-	{0x1fab2864cd5073cbull, spu_aot_1fab2864cd5073cb, 396},
+	{0x1fab2864cd5073cbull, spu_aot_1fab2864cd5073cb, 395},
 	{0x1fde2eb6c8376a84ull, spu_aot_1fde2eb6c8376a84, 312},
 	{0x1fde8ac106f9e723ull, spu_aot_1fde8ac106f9e723, -1},
 	{0x2003ee1531ffb19full, spu_aot_2003ee1531ffb19f, 324},
@@ -5067,7 +5068,7 @@ const SpuAotBlock g_spu_aot[3696] = {
 	{0x3409bc7cc37d9b07ull, spu_aot_3409bc7cc37d9b07, 155},
 	{0x340aa953ad61bd82ull, spu_aot_340aa953ad61bd82, 402},
 	{0x340e890acc2f2e39ull, spu_aot_340e890acc2f2e39, -1},
-	{0x3422f22e8df55b73ull, spu_aot_3422f22e8df55b73, 395},
+	{0x3422f22e8df55b73ull, spu_aot_3422f22e8df55b73, 396},
 	{0x34230444d71738f9ull, spu_aot_34230444d71738f9, 41},
 	{0x344929a7908347a2ull, spu_aot_344929a7908347a2, 105},
 	{0x3461849a76d0605cull, spu_aot_3461849a76d0605c, 325},
@@ -6404,6 +6405,7 @@ const SpuAotBlock g_spu_aot[3696] = {
 	{0x911505a2c90f99a8ull, spu_aot_911505a2c90f99a8, 405},
 	{0x911bc686ac45cf35ull, spu_aot_911bc686ac45cf35, -1},
 	{0x9121c00f8d9fb098ull, spu_aot_9121c00f8d9fb098, 599},
+	{0x913b8b540cd5c5ddull, spu_aot_913b8b540cd5c5dd, 585},
 	{0x916f826901a040c2ull, spu_aot_916f826901a040c2, -1},
 	{0x91817432be4abb56ull, spu_aot_91817432be4abb56, 325},
 	{0x9188f82830dfc742ull, spu_aot_9188f82830dfc742, 291},
@@ -6646,7 +6648,7 @@ const SpuAotBlock g_spu_aot[3696] = {
 	{0xa17883774a58426bull, spu_aot_a17883774a58426b, 307},
 	{0xa1b7ca08f6416a7eull, spu_aot_a1b7ca08f6416a7e, 425},
 	{0xa1c1aa307ab1bc8dull, spu_aot_a1c1aa307ab1bc8d, 570},
-	{0xa1ce982acc58ca63ull, spu_aot_a1ce982acc58ca63, 395},
+	{0xa1ce982acc58ca63ull, spu_aot_a1ce982acc58ca63, 396},
 	{0xa1ddc9b89967f634ull, spu_aot_a1ddc9b89967f634, -1},
 	{0xa204a000c8d7fd7eull, spu_aot_a204a000c8d7fd7e, 314},
 	{0xa20ee7615daa3e78ull, spu_aot_a20ee7615daa3e78, -1},
@@ -7708,7 +7710,7 @@ const SpuAotBlock g_spu_aot[3696] = {
 	{0xecc0fe30055768dfull, spu_aot_ecc0fe30055768df, 314},
 	{0xececa1c2d8dcdd20ull, spu_aot_ececa1c2d8dcdd20, 230},
 	{0xecedde4395d1a970ull, spu_aot_ecedde4395d1a970, 575},
-	{0xecf749e0bdf5dd4dull, spu_aot_ecf749e0bdf5dd4d, 396},
+	{0xecf749e0bdf5dd4dull, spu_aot_ecf749e0bdf5dd4d, 395},
 	{0xed1858c59f768639ull, spu_aot_ed1858c59f768639, 421},
 	{0xed1c323093322ffbull, spu_aot_ed1c323093322ffb, 476},
 	{0xed21d7097b262f7dull, spu_aot_ed21d7097b262f7d, 197},
@@ -7997,7 +7999,7 @@ const SpuAotBlock g_spu_aot[3696] = {
 	{0xffe024722f669336ull, spu_aot_ffe024722f669336, -1},
 	{0xffe2c2902c153db4ull, spu_aot_ffe2c2902c153db4, 78},
 };
-const u32 g_spu_aot_count = 3696;
+const u32 g_spu_aot_count = 3697;
 static const u32 spu_aotc_0_m[] = {0x00000, 1, 0x00A2C, 17, 0x00A5C, 5, 0x00A70, 8};
 static const u32 spu_aotc_1_m[] = {0x00A90, 2, 0x01AB0, 20, 0x01B00, 14, 0x01B38, 6, 0x01B50, 2, 0x01B58, 18, 0x01BA0, 1, 0x01BA4, 29, 0x01C18, 9, 0x01C3C, 8, 0x01C58, 1, 0x01C5C, 19, 0x01CA8, 2, 0x01CB0, 33, 0x01D34, 1, 0x01D38, 16, 0x01D78, 4, 0x01D84, 1, 0x01D88, 12, 0x01DB8, 18, 0x01E00, 6, 0x01E18, 4, 0x01E28, 4, 0x01E38, 1, 0x01E3C, 15, 0x01E78, 2, 0x01E80, 2, 0x01E88, 10, 0x01EB0, 17, 0x01EF4, 15, 0x01F00, 12, 0x01F30, 33, 0x02048, 2, 0x02050, 29, 0x02178, 2, 0x02190, 6, 0x021A8, 6, 0x021C0, 9, 0x021E4, 11, 0x021F4, 7, 0x02210, 1, 0x02214, 1, 0x02218, 4, 0x02220, 2, 0x02230, 2, 0x02238, 2, 0x02240, 1, 0x02244, 1, 0x02248, 2, 0x02268, 4, 0x02278, 4, 0x027B8, 20};
 static const u32 spu_aotc_2_m[] = {0x00A98, 11, 0x00AB0, 5, 0x00AC4, 7};
@@ -8393,8 +8395,8 @@ static const u32 spu_aotc_391_m[] = {0x09448, 3, 0x09454, 1, 0x09458, 2, 0x09460
 static const u32 spu_aotc_392_m[] = {0x09488, 2, 0x09490, 2};
 static const u32 spu_aotc_393_m[] = {0x09498, 10, 0x094C0, 2};
 static const u32 spu_aotc_394_m[] = {0x09528, 4, 0x09538, 2};
-static const u32 spu_aotc_395_m[] = {0x09540, 2, 0x09548, 2};
-static const u32 spu_aotc_396_m[] = {0x09540, 1, 0x09544, 7};
+static const u32 spu_aotc_395_m[] = {0x09540, 1, 0x09544, 7};
+static const u32 spu_aotc_396_m[] = {0x09540, 2, 0x09548, 2};
 static const u32 spu_aotc_397_m[] = {0x09550, 10, 0x09578, 2};
 static const u32 spu_aotc_398_m[] = {0x095D8, 4, 0x095E8, 2};
 static const u32 spu_aotc_399_m[] = {0x095F0, 80, 0x09710, 8};
@@ -8583,7 +8585,7 @@ static const u32 spu_aotc_581_m[] = {0x11674, 5, 0x11688, 18, 0x116D0, 30, 0x118
 static const u32 spu_aotc_582_m[] = {0x11860, 13, 0x11894, 1, 0x125C8, 28, 0x12638, 8, 0x12778, 11};
 static const u32 spu_aotc_583_m[] = {0x11A18, 4, 0x11A88, 7};
 static const u32 spu_aotc_584_m[] = {0x11CD0, 16, 0x12054, 6};
-static const u32 spu_aotc_585_m[] = {0x11CE0, 2, 0x11CE8, 20, 0x11D38, 11, 0x11D64, 3, 0x11D70, 22, 0x11DC8, 49, 0x11E8C, 1, 0x11E90, 20, 0x11EE0, 29, 0x11F6C, 4, 0x11F74, 2};
+static const u32 spu_aotc_585_m[] = {0x11CE0, 2, 0x11CE8, 20, 0x11D38, 11, 0x11D64, 3, 0x11D70, 22, 0x11DC8, 49, 0x11E8C, 1, 0x11E90, 20, 0x11EE0, 29, 0x11F60, 3, 0x11F6C, 4, 0x11F74, 2};
 static const u32 spu_aotc_586_m[] = {0x12390, 126, 0x12588, 4, 0x126C0, 5};
 static const u32 spu_aotc_587_m[] = {0x123A8, 6, 0x123C0, 20, 0x12410, 4, 0x12420, 22, 0x12478, 12, 0x124A8, 8, 0x12658, 31, 0x126D4, 5, 0x12788, 2, 0x127B8, 13};
 static const u32 spu_aotc_588_m[] = {0x12658, 13, 0x1268C, 1, 0x12690, 12, 0x126D4, 1, 0x126D8, 4, 0x12718, 4, 0x12738, 15};
@@ -9598,8 +9600,8 @@ const SpuAotCluster g_spu_aot_clusters[602] = {
 	{0x8efad47e716319afull, 0x09488, 0x09498, spu_aotc_392_m, 2, spu_aotc_392, spu_aotc_392_l, 1},
 	{0xae63016f5a2793ddull, 0x09498, 0x094C8, spu_aotc_393_m, 2, spu_aotc_393, spu_aotc_393_l, 1},
 	{0x6954b7ad3f5d6b3cull, 0x09528, 0x09540, spu_aotc_394_m, 2, spu_aotc_394, spu_aotc_394_l, 1},
-	{0x8efad47e716319afull, 0x09540, 0x09550, spu_aotc_395_m, 2, spu_aotc_395, spu_aotc_395_l, 1},
-	{0x49a07c83234efccdull, 0x09540, 0x09560, spu_aotc_396_m, 2, spu_aotc_396, spu_aotc_396_l, 1},
+	{0x49a07c83234efccdull, 0x09540, 0x09560, spu_aotc_395_m, 2, spu_aotc_395, spu_aotc_395_l, 1},
+	{0x8efad47e716319afull, 0x09540, 0x09550, spu_aotc_396_m, 2, spu_aotc_396, spu_aotc_396_l, 1},
 	{0x6cbcfa2207480374ull, 0x09550, 0x09580, spu_aotc_397_m, 2, spu_aotc_397, spu_aotc_397_l, 1},
 	{0x6954b7ad3f5d6b3cull, 0x095D8, 0x095F0, spu_aotc_398_m, 2, spu_aotc_398, spu_aotc_398_l, 1},
 	{0xd9a37566fe98d1cdull, 0x095F0, 0x09730, spu_aotc_399_m, 2, spu_aotc_399, spu_aotc_399_l, 4},
@@ -9788,7 +9790,7 @@ const SpuAotCluster g_spu_aot_clusters[602] = {
 	{0xc2a7d2d04e058e6aull, 0x11860, 0x127A4, spu_aotc_582_m, 5, spu_aotc_582, spu_aotc_582_l, 6},
 	{0x802c89a41fa0e5adull, 0x11A18, 0x11AA4, spu_aotc_583_m, 2, spu_aotc_583, spu_aotc_583_l, 2},
 	{0x2ad094a4afa912b2ull, 0x11CD0, 0x1206C, spu_aotc_584_m, 2, spu_aotc_584, spu_aotc_584_l, 3},
-	{0x291aed0c9b831fbaull, 0x11CE0, 0x11F7C, spu_aotc_585_m, 11, spu_aotc_585, spu_aotc_585_l, 6},
+	{0x0491cbf67a6014b0ull, 0x11CE0, 0x11F7C, spu_aotc_585_m, 12, spu_aotc_585, spu_aotc_585_l, 6},
 	{0xcfe720c309b16979ull, 0x12390, 0x126D4, spu_aotc_586_m, 3, spu_aotc_586, spu_aotc_586_l, 6},
 	{0xc989fc82dfa8abf5ull, 0x123A8, 0x127EC, spu_aotc_587_m, 10, spu_aotc_587, spu_aotc_587_l, 6},
 	{0x3782182120b9e215ull, 0x12658, 0x12774, spu_aotc_588_m, 7, spu_aotc_588, spu_aotc_588_l, 3},

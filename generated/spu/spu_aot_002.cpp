@@ -2,6 +2,33 @@
 #define SPU_AOT_FAST
 #include "spu_ops.h"
 
+// block 05838: 04000192 3fe0020b 40803203 3fe0030e 40803608 24ff4081 4080040a 3880c909 1cf40081 38820902 3b80c483 3b820104 1800c182 1800c102 0f608102 18048106 18028303 38828302 3b80c102 4122c003 58c08204 58c0c204 762b4211 20000691
+void spu_aot_d0ebcf1d42fe7e66(SPUThread& __restrict s) {
+	s.pc = 0x05838; op_ori(s, 0x04000192u);
+	s.pc = 0x0583C; op_shlqbyi(s, 0x3FE0020Bu);
+	s.pc = 0x05840; op_il(s, 0x40803203u);
+	s.pc = 0x05844; op_shlqbyi(s, 0x3FE0030Eu);
+	s.pc = 0x05848; op_il(s, 0x40803608u);
+	s.pc = 0x0584C; op_stqd(s, 0x24FF4081u);
+	s.pc = 0x05850; op_il(s, 0x4080040Au);
+	s.pc = 0x05854; op_lqx(s, 0x3880C909u);
+	s.pc = 0x05858; op_ai(s, 0x1CF40081u);
+	s.pc = 0x0585C; op_lqx(s, 0x38820902u);
+	s.pc = 0x05860; op_rotqby(s, 0x3B80C483u);
+	s.pc = 0x05864; op_rotqby(s, 0x3B820104u);
+	s.pc = 0x05868; op_a(s, 0x1800C182u);
+	s.pc = 0x0586C; op_a(s, 0x1800C102u);
+	s.pc = 0x05870; op_shli(s, 0x0F608102u);
+	s.pc = 0x05874; op_a(s, 0x18048106u);
+	s.pc = 0x05878; op_a(s, 0x18028303u);
+	s.pc = 0x0587C; op_lqx(s, 0x38828302u);
+	s.pc = 0x05880; op_rotqby(s, 0x3B80C102u);
+	s.pc = 0x05884; op_ilhu(s, 0x4122C003u);
+	s.pc = 0x05888; op_fm(s, 0x58C08204u);
+	s.pc = 0x0588C; op_fm(s, 0x58C0C204u);
+	s.pc = 0x05890; op_cflts(s, 0x762B4211u);
+	s.pc = 0x05894; op_brz(s, 0x20000691u);
+}
 // block 0466c: 1c082802 58144103 80544103 0800a803 58140102 0f610192 20001502
 void spu_aot_d0f8a43f47e4d981(SPUThread& __restrict s) {
 	s.pc = 0x0466C; op_ai(s, 0x1C082802u);

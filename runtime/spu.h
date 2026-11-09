@@ -64,6 +64,7 @@ struct SPUThread {
     bool has_reservation = false;
     u32 res_addr = 0, res_gen = 0;   // reservation line, its write generation at GETLLAR
     alignas(16) u8 res_data[128];
+    u32 llar_polls = 0;   // GETLLARs in a row that found the reserved line unchanged (polling, see spu.cpp)
     // mailboxes
     std::mutex mbox_m;
     std::condition_variable mbox_cv;

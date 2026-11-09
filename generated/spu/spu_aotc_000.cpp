@@ -11934,6 +11934,7 @@ L_1450e2742eb0ade5:
 	goto out;
 L_09996a7c054f8ada:
 	s.instructions += 43;
+	{ s.gpr[0] = L.gpr[0]; s.gpr[2] = L.gpr[2]; s.gpr[3] = L.gpr[3]; s.gpr[4] = L.gpr[4]; s.gpr[5] = L.gpr[5]; s.gpr[6] = L.gpr[6]; s.gpr[7] = L.gpr[7]; s.gpr[8] = L.gpr[8]; s.gpr[9] = L.gpr[9]; s.gpr[10] = L.gpr[10]; s.gpr[11] = L.gpr[11]; s.gpr[12] = L.gpr[12]; s.gpr[80] = L.gpr[80]; s.gpr[91] = L.gpr[91]; s.pc = L.pc; if (spu_skip_tri_search(s)) return; }
 	L.pc = 0x04824; op_a(L, 0x18028502u);
 	L.pc = 0x04828; op_a(L, 0x18028102u);
 	L.pc = 0x0482C; op_shli(L, 0x0F610102u);

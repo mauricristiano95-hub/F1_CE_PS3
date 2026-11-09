@@ -172,6 +172,7 @@ are kept on a Deck too.
 | `F1CE_SHAKE_FILTER=0` | with `F1CE_60FPS`: turns off the shake filter (then the old 30 fps hold for a standing car applies) |
 | `F1CE_SHAKE_RANGE=<lo hex>,<hi hex>` | debug: the shake filter only touches that part of the car object (to bisect side effects) |
 | `F1CE_SPIN_WAIT=1`, `F1CE_TASK_THREADS=1`, `F1CE_PRIO=0` | the waits, SPURS task threads and thread priorities as before 2026-11-06 (spinning waits, a new thread per task, all at normal priority): A/B comparisons |
+| `F1CE_LLAR_SPIN=1` | SPU threads polling an unchanged line with GETLLAR keep spinning instead of yielding (before 2026-11-09): A/B |
 | `F1CE_CPUS=<n>` | runs on the first n logical processors only (Windows), to estimate smaller machines: 8 = 4 cores / 8 threads like a Steam Deck (whose cores are slower) |
 | `F1CE_THREAD_CPU=1` | with the `cpu:` line every 5 s: the cores each thread used (threads are named) |
 | `F1CE_TICKS_FIXED=1` | with `F1CE_60FPS`: exactly one tick per frame whatever the time (with frame dumps, to see per-tick motion) |
@@ -187,8 +188,9 @@ are kept on a Deck too.
 | `F1CE_PM_NATIVE=0` | runs the job manager policy module's functions as SPU code instead of their native versions (`runtime/spu_pm.cpp`) |
 | `F1CE_PM_CHECK=1/2` | every 64th call (2: every call) of each native job manager function also runs on two copies of the SPU, interpreter against native (DMA puts only logged), and logs differences in local store, registers, MFC state and DMA commands (`pm check` lines) |
 | `F1CE_JOBLIST_LOG=1` | traces how the frame job lists (w1/w2, queues 0x10C15100/0x10C29100) and the w0 queue are built (`runtime/hle_joblist.cpp`, `PROBES` in `tools/recomp.py`): PPU reserves, SPU entry writes with the writer's job, w0 grabs/ends, the frame end's waits and compaction; logs jobs written behind a queue's head, and when the watchdog sees the same job list wait twice it prints the cycles under way (`joblist:` lines). `F1CE_JOBLIST_DUMP_AT=<s>` also prints the first three cycles after that many seconds |
+| `F1CE_SPU_NOFASTSEARCH=1` | runs the rain job's triangle search (04824, workload 3) as translated, not natively (`spu_fast_tri_search`) |
 | `F1CE_SPU_NOFASTCULL=1` | runs the geometry job's vertex transform and triangle cull as translated, not the native versions (`spu_fast_*` in `runtime/spu_ops.h`) |
-| `F1CE_SPU_CULL_CHECK=1/2` | every 64th transform and cull also runs on two copies of the SPU, interpreter against native, and logs differences; 2 puts NaN, infinities and huge values into the copies' input |
+| `F1CE_SPU_CULL_CHECK=1/2` | every 64th transform, cull and rain triangle search also runs on two copies of the SPU, interpreter against native, and logs differences; 2 puts NaN, infinities and huge values into the copies' input |
 | `SPU_AOT_HEAT=1 python -I tools/spu_aot.py` | builds counters per SPU block; the game writes `spu_heat.txt` every 10 s (regenerate without it afterwards) |
 | `F1CE_MAX_FRAMES_AHEAD=<n>` | frames the PPU may queue ahead of the renderer (default 1) |
 | `F1CE_TASK_DMA_LOG=1` | logs each distinct DMA of the SPURS tasks once (with the data of transfers up to 128 bytes); `=<elf hex>` only for the tasks of that ELF |
@@ -1289,3 +1291,26 @@ banks, then waits for SPU work.
     indices (`lua_gettop`/`lua_settop`), since running Lua can reallocate the thread's stack (a saved `L->top` corrupted
     the engine's next push much later and sent the bisection after unrelated causes); MainMenu animates its picture from
     `mPreviousMenuItem`, which is 0 until the first real move, so the focus step sets it as a move does.
+- **PGO + LTO, and SPU polling on small machines (2026-11-09):**
+  - PGO + ThinLTO release build (see [Build](#build)): grid 55.8 -> 58.2 fps uncapped (3 A/B pairs).
+  - CPU proxy (`F1CE_CPUS`, 30 fps mode, scale 1): 12 and 8 CPUs held a 1% low of ~28 on the grid, 6 CPUs only 18-22, and
+    heavy rain at Spain on 6 CPUs had 2.4-4.9 s stalls (none on 12 CPUs). During a stall main waited in fn 0x55127c while
+    four SPUs sat in one workload polling: in-order jobs at 0x90e8-0x96e8 or job managers rescanning thousands of skip
+    entries (7-12 M GETLLAR/s). On the Cell polling is free; here each SPU is a host thread, and the pollers took the CPUs
+    from the threads they waited for.
+  - Fix (`runtime/spu.cpp`, GETLLAR): after 8 reads in a row of an unchanged line (same write generation) the SPU thread
+    yields. 6 CPUs: rain 1% low ~20 -> 24.7 with no stall in 4 runs (old behaviour: stalls or 650 ms frames), dry grid
+    18-22 -> ~28; 12 CPUs uncapped grid unchanged (58.8 / 58.8). `F1CE_LLAR_SPIN=1` = old behaviour (A/B).
+  - Diagnostic: a workload run longer than 1 s logs `long run:` (pc, reservation line) and saves the worker's LS
+    (`long_run_w<k>_<n>.bin`). The `F1CE_SPU_PROFILE` sampler is biased on `F1CE_CPUS` proxies (it runs when workers
+    block): take SPU hotspots from full-CPU runs. The heavy-rain sweep of all tracks found only one untranslated block.
+  - SPU host profile in heavy rain (12 CPUs; `F1CE_HOST_PROFILE` now reads the f1ce.map next to the exe): dispatcher
+    `SPUThread::run` 8.6% of worker samples (its hottest instruction is the dispatch-cache entry load), DMA emulation ~8.5%,
+    the rain job's loop (cluster 0x47a8) 3.7%, the job command loop 2.5%, everything else under 1.2%.
+  - The rain job (workload 3, one SPU, so its time is latency) searches up to 1024 triangles for the one under a point in
+    the x/z plane (04824-048cc); only lane 1 of its quads decides. `spu_fast_tri_search` (`runtime/spu_ops.h`, a SKIP in
+    `tools/spu_aot.py`) tests eight triangles per pass with AVX2 gathers and the same operations (sat, fused fnms), stops
+    at the first hit and lets the translated code run that last pass, so every register comes out exact (only dead lanes
+    1-3 of r10 differ). `F1CE_SPU_CULL_CHECK=1/2`: 12k searches compared, 0 differ (also with NaN/infinity input).
+    Workload 3: 3.8% -> 0.7% of all SPU samples; 6-CPU heavy rain, 4 pairs: 1% low 23.8 -> 24.1, p99 47.6 -> 46.9 ms,
+    4.41 -> 4.32 cores (better in every pair, small). `F1CE_SPU_NOFASTSEARCH=1` = translated.

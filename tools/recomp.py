@@ -46,6 +46,7 @@ PROBES = {0x1187EC: "probe_1187ec", 0x11B05C: "probe_11b05c",   # hle_physics.cp
           0x48ACC8: "joblist_compact", 0x489CB8: "joblist_w0_drained", 0x48ACA8: "joblist_prev_done",
           0x5514A4: "joblist_push",
           0x551278: "jobwait_551228", 0x551354: "jobwait_55127c", 0x55140C: "jobwait_5513b8",   # spu_pm.cpp: taken jobs
+          0x5514A0: "jobpoll_551410",   # spu_pm.cpp: the MP3 decoder's "queue done?" poll
           0x5BBBB4: "audio_cmd",   # hle_misc.cpp: the sound engine's command dispatch (F1CE_AUDIO_CMD_LOG)
           0x7534C: "lua_script_loaded", 0x75428: "lua_script_ran"}   # hle_frontend.cpp: front-end script loader
 SPIN_LOOPS = {0x551228, 0x5513BC}   # the job manager's waits: they only poll counters the SPUs write

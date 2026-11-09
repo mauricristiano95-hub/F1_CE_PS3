@@ -895,6 +895,62 @@ template <class S> bool spu_fast_vertex_transform(S& s) {
     s.pc = 0xD6D8;
     return true;
 }
+// 04824-048cc, the rain job's search (workload 3, heavy rain only, ~4% of all SPU time there): the first of up to 1024
+// triangles (48 bytes, v0 v1 v2 at r11 + 48 i) that holds the point r12 in the x/z plane. The SPU code works on whole
+// quads (the shuffles r83 r84 make three cross products) but only lane 1 decides: next triangle if -u > 0, -v > 0 or
+// u + v > det. Here that lane alone, with the same operations in the same order (sat, fused fnms), scans from r10 to the
+// hit (or to triangle 1023) and leaves that last pass to the SPU code, which then sets every register exactly. Only
+// lanes 1-3 of r10 differ (the loop adds leftovers into them); after the loop they only reach address lanes that are
+// never used. Declines when it would not move on, so the last pass runs translated.
+extern bool g_spu_fastsearch;
+void spu_search_check(const v128* gpr, const u8* ls);
+template <class S> bool spu_fast_tri_search(S& s) {
+    const u32 i0 = s.pref(10), base = s.pref(11);
+    if (!g_spu_fastsearch || i0 >= 0x3FF) return false;
+    // eight triangles per pass (lane l = triangle i + l); lanes past the hit or past 1023 are computed and ignored
+    const __m256 hi = _mm256_set1_ps(FLT_MAX), lo = _mm256_set1_ps(-FLT_MAX), zero = _mm256_setzero_ps(), minus1 = _mm256_set1_ps(-1.0f);
+    const auto sat = [&](__m256 x) { return _mm256_max_ps(_mm256_min_ps(x, hi), lo); };
+    const __m256i swap = _mm256_broadcastsi128_si256(_mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12));
+    const __m256i lane48 = _mm256_setr_epi32(0, 48, 96, 144, 192, 240, 288, 336), ls_mask = _mm256_set1_epi32(0x3FFF0);
+    const auto gather = [&](__m256i off) {   // big-endian words of LS at the offsets
+        return _mm256_castsi256_ps(_mm256_shuffle_epi8(_mm256_i32gather_epi32((const int*)s.ls, off, 1), swap));
+    };
+    const __m256 px = _mm256_castsi256_ps(_mm256_set1_epi32((int)s.gpr[12].w[3]));   // element 0 (x)
+    const __m256 pz = _mm256_castsi256_ps(_mm256_set1_epi32((int)s.gpr[12].w[1]));   // element 2 (z)
+    const __m256i eight = _mm256_set1_epi32(8);
+    u32 i = i0, stop;
+    for (;; i += 8) {
+        const __m256i a = _mm256_add_epi32(_mm256_set1_epi32((int)(i * 48 + base)), lane48);
+        const __m256i o0 = _mm256_and_si256(a, ls_mask);
+        const __m256i o1 = _mm256_and_si256(_mm256_add_epi32(a, _mm256_set1_epi32(16)), ls_mask);
+        const __m256i o2 = _mm256_and_si256(_mm256_add_epi32(a, _mm256_set1_epi32(32)), ls_mask);
+        const __m256 v0x = gather(o0), v0z = gather(_mm256_add_epi32(o0, eight));
+        const __m256 v1x = gather(o1), v1z = gather(_mm256_add_epi32(o1, eight));
+        const __m256 v2x = gather(o2), v2z = gather(_mm256_add_epi32(o2, eight));
+        const __m256 dx = sat(_mm256_sub_ps(px, v0x)), dz = sat(_mm256_sub_ps(pz, v0z));
+        const __m256 e1x = sat(_mm256_sub_ps(v1x, v0x)), e1z = sat(_mm256_sub_ps(v1z, v0z));
+        const __m256 e2x = sat(_mm256_sub_ps(v2x, v0x)), e2z = sat(_mm256_sub_ps(v2z, v0z));
+        const __m256 p7 = sat(_mm256_mul_ps(e2z, dx)), p8 = sat(_mm256_mul_ps(dz, e1x)), p5 = sat(_mm256_mul_ps(e2z, e1x));
+        const __m256 u = sat(_mm256_fnmadd_ps(e2x, dz, p7)), v = sat(_mm256_fnmadd_ps(dx, e1z, p8));
+        const __m256 det = sat(_mm256_fnmadd_ps(e2x, e1z, p5));
+        const __m256 out = _mm256_or_ps(_mm256_or_ps(_mm256_cmp_ps(sat(_mm256_mul_ps(u, minus1)), zero, _CMP_GT_OQ),
+                                                     _mm256_cmp_ps(sat(_mm256_add_ps(u, v)), det, _CMP_GT_OQ)),
+                                        _mm256_cmp_ps(sat(_mm256_mul_ps(v, minus1)), zero, _CMP_GT_OQ));
+        const u32 hits = ~(u32)_mm256_movemask_ps(out) & 0xFF;
+        if (hits && i + (u32)__builtin_ctz(hits) <= 0x3FF) { stop = i + (u32)__builtin_ctz(hits); break; }   // first hit
+        if (i + 7 >= 0x3FF) { stop = 0x3FF; break; }   // none up to the last triangle: its pass runs translated
+    }
+    i = stop;
+    if (i == i0) return false;
+    s.instructions += (u64)(i - i0) * 43;
+    s.gpr[10].w[3] = i;
+    s.pc = 0x4824;
+    return true;
+}
+template <class S> bool spu_skip_tri_search(S& s) {
+    if (g_spu_cull_check) spu_search_check(s.gpr, s.ls);
+    return spu_fast_tri_search(s);
+}
 template <class S> bool spu_skip_vertex_transform(S& s) {
     if (g_spu_cull_check) spu_xform_check(s.gpr, s.ls);
     return spu_fast_vertex_transform(s);

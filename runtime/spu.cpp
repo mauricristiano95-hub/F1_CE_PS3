@@ -14,6 +14,7 @@
 
 #include <mutex>
 #include <set>
+#include <thread>
 
 namespace {
 using Handler = void (*)(SPUThread&, u32);
@@ -587,6 +588,7 @@ void SPUThread::dma(u32 cmd) {
             // without taking the lock: every locked writer stores the line, then bumps its generation, so a copy made
             // while the lock was free and the generation did not move is a consistent snapshot (as with a seqlock)
             ea &= ~127u;
+            const u32 prev_addr = res_addr, prev_gen = res_gen;
             SpinLock& l = atomic_lock(ea);
             for (;;) {
                 while (l.held.load(std::memory_order_acquire)) _mm_pause();
@@ -595,6 +597,17 @@ void SPUThread::dma(u32 cmd) {
                 memcpy(res_data, gmem(ea), 128);
                 std::atomic_thread_fence(std::memory_order_acquire);
                 if (!l.held.load(std::memory_order_relaxed) && line_generation(ea) == g) { res_gen = g; break; }
+            }
+            // An SPU that re-reads an unchanged line is polling (in-order jobs waiting for their turn, job managers
+            // finding only skip entries). Each SPU is a host thread here, so on a machine with few CPUs the pollers
+            // took the CPU from the thread they waited for: 2-3.5 s stalls in rain on 6 CPUs (2026-11-09). After a few
+            // unchanged reads the thread yields; with CPUs to spare the yield returns at once.
+            // F1CE_LLAR_SPIN=1: no yield (A/B)
+            static const bool llar_spin = getenv("F1CE_LLAR_SPIN") != nullptr;
+            if (prev_addr == ea && prev_gen == res_gen) {
+                if (++llar_polls >= 8 && !llar_spin) std::this_thread::yield();
+            } else {
+                llar_polls = 0;
             }
             write_ls(lsa & 0x3FF80, res_data, 128);
             res_addr = ea;
@@ -701,6 +714,7 @@ static v128 shufb_ref(const v128& a, const v128& b, const v128& c) {
 bool g_spu_idiom = getenv("F1CE_SPU_NOIDIOM") == nullptr;
 bool g_spu_nocull = getenv("F1CE_SPU_NOCULL") != nullptr;
 bool g_spu_fastcull = getenv("F1CE_SPU_NOFASTCULL") == nullptr;
+bool g_spu_fastsearch = getenv("F1CE_SPU_NOFASTSEARCH") == nullptr;   // the rain job's triangle search (spu_ops.h)
 int g_spu_cull_check = getenv("F1CE_SPU_CULL_CHECK") ? atoi(getenv("F1CE_SPU_CULL_CHECK")) : 0;
 
 // F1CE_SPU_CULL_CHECK=1: every 64th transform and triangle cull of the geometry job runs on two copies of the SPU, by the
@@ -767,6 +781,38 @@ void spu_cull_check(const v128* gpr, const u8* ls) {
         }
     }
     if ((no & 1023) == 0) LOG_I("spu cull check: %u compared, %u differ, %u left to the translated loop", no + 1, c.bad.load(), c.declined.load());
+}
+
+// The rain job's triangle search (also under F1CE_SPU_CULL_CHECK): the interpreter runs the loop to its exit at 048d0, the
+// other copy skips with the native scan and interprets the last pass. Every register must match but r2 (the loop
+// condition, rewritten at 048d0) and lanes 1-3 of r10 (leftovers the native scan does not add up, never read later).
+void spu_search_check(const v128* gpr, const u8* ls) {
+    static CheckCounts c;
+    const u32 call = c.calls++;
+    if (call & 63) return;
+    thread_local CheckPair p;
+    SPUThread& a = *p.a; SPUThread& b = *p.b;
+    memcpy(a.ls, ls, 0x40000);
+    memcpy(a.gpr, gpr, sizeof(a.gpr));
+    if (g_spu_cull_check >= 2) check_poison(a, a.pref(11) & 0x3FFF0, 1024 * 3, call * 2654435761u);
+    memcpy(b.ls, a.ls, 0x40000);
+    memcpy(b.gpr, a.gpr, sizeof(a.gpr));
+    const u32 i0 = a.pref(10);
+    if (!check_interpret(a, 0x4824, 0x48D0)) { LOG_W("spu search check: the interpreter did not reach the loop exit"); return; }
+    if (!spu_fast_tri_search(b)) { c.declined++; return; }
+    const u32 skipped_to = b.pref(10);
+    if (!check_interpret(b, b.pc, 0x48D0)) { LOG_W("spu search check: the last pass did not reach the loop exit"); return; }
+    const u32 no = c.checked++;
+    int bad_reg = -1;
+    for (int r = 0; r < 128 && bad_reg < 0; r++) {
+        if (r == 2) continue;
+        if (r == 10 ? a.gpr[r].w[3] != b.gpr[r].w[3] : memcmp(&a.gpr[r], &b.gpr[r], 16) != 0) bad_reg = r;
+    }
+    if (bad_reg >= 0 && c.bad++ < 10)
+        LOG_W("spu search check: DIFFERENT in r%d (start %u, native skipped to %u, exit at %u vs %u): %08x %08x %08x %08x vs %08x %08x %08x %08x",
+              bad_reg, i0, skipped_to, a.pref(10), b.pref(10), a.gpr[bad_reg].w[3], a.gpr[bad_reg].w[2], a.gpr[bad_reg].w[1],
+              a.gpr[bad_reg].w[0], b.gpr[bad_reg].w[3], b.gpr[bad_reg].w[2], b.gpr[bad_reg].w[1], b.gpr[bad_reg].w[0]);
+    if ((no & 1023) == 0) LOG_I("spu search check: %u compared, %u differ, %u left to the translated loop", no + 1, c.bad.load(), c.declined.load());
 }
 
 void spu_xform_check(const v128* gpr, const u8* ls) {

@@ -2649,28 +2649,6 @@ void spu_aotc_395(SPUThread& __restrict s) {
 	const u64 cw = s.code_writes;
 	u32 budget = 4096;
 	switch (s.pc) {
-		case 0x09540: goto L_a1ce982acc58ca63;
-		case 0x09548: goto L_3422f22e8df55b73;
-		default: goto out;
-	}
-L_a1ce982acc58ca63:
-	s.instructions += 2;
-	s.pc = 0x09540; op_nop(s, 0x00200000u);
-	s.pc = 0x09544; op_brsl(s, 0x33000082u);
-	if (s.pc == 0x09548) { if (s.can_chain(cw, 0x09548) && --budget) goto L_3422f22e8df55b73; goto out; }
-	goto out;
-L_3422f22e8df55b73:
-	s.instructions += 2;
-	s.pc = 0x09548; op_ai(s, 0x1C020102u);
-	s.pc = 0x0954C; op_bi(s, 0x35080100u);
-	goto out;
-out:
-	return;
-}
-void spu_aotc_396(SPUThread& __restrict s) {
-	const u64 cw = s.code_writes;
-	u32 budget = 4096;
-	switch (s.pc) {
 		case 0x09540: goto L_1fab2864cd5073cb;
 		case 0x09544: goto L_ecf749e0bdf5dd4d;
 		default: goto out;
@@ -2689,6 +2667,28 @@ L_ecf749e0bdf5dd4d:
 	s.pc = 0x09554; op_lqd(s, 0x34004080u);
 	s.pc = 0x09558; op_nop(s, 0x4020007Fu);
 	s.pc = 0x0955C; op_bi(s, 0x35000000u);
+	goto out;
+out:
+	return;
+}
+void spu_aotc_396(SPUThread& __restrict s) {
+	const u64 cw = s.code_writes;
+	u32 budget = 4096;
+	switch (s.pc) {
+		case 0x09540: goto L_a1ce982acc58ca63;
+		case 0x09548: goto L_3422f22e8df55b73;
+		default: goto out;
+	}
+L_a1ce982acc58ca63:
+	s.instructions += 2;
+	s.pc = 0x09540; op_nop(s, 0x00200000u);
+	s.pc = 0x09544; op_brsl(s, 0x33000082u);
+	if (s.pc == 0x09548) { if (s.can_chain(cw, 0x09548) && --budget) goto L_3422f22e8df55b73; goto out; }
+	goto out;
+L_3422f22e8df55b73:
+	s.instructions += 2;
+	s.pc = 0x09548; op_ai(s, 0x1C020102u);
+	s.pc = 0x0954C; op_bi(s, 0x35080100u);
 	goto out;
 out:
 	return;
@@ -25167,6 +25167,7 @@ void spu_aotc_585(SPUThread& __restrict s) {
 		case 0x11E8C: goto L_9f7133fd097e9394;
 		case 0x11E90: goto L_542a5ada685465f4;
 		case 0x11EE0: goto L_a1109b4c56067938;
+		case 0x11F60: goto L_913b8b540cd5c5dd;
 		case 0x11F6C: goto L_29135c75939c050d;
 		case 0x11F74: goto L_5947da59e6321a55;
 		default: goto out;
@@ -25310,6 +25311,7 @@ L_66a802cd1d0c8bad:
 	s.pc = 0x11E80; op_il(s, 0x40800084u);
 	s.pc = 0x11E84; op_selb(s, 0x81610586u);
 	s.pc = 0x11E88; op_brhz(s, 0x22001B02u);
+	if (s.pc == 0x11F60) { if (s.can_chain(cw, 0x11F60) && --budget) goto L_913b8b540cd5c5dd; goto out; }
 	if (s.pc == 0x11E8C) { if (s.can_chain(cw, 0x11E8C) && --budget) goto L_9f7133fd097e9394; goto out; }
 	goto out;
 L_9f7133fd097e9394:
@@ -25386,6 +25388,13 @@ L_a1109b4c56067938:
 	if (s.halted) { s.pc = 0x11F4C; goto out; }
 	s.pc = 0x11F4C; op_il(s, 0x40800003u);
 	s.pc = 0x11F50; op_br(s, 0x32000480u);
+	if (s.pc == 0x11F74) { if (s.can_chain(cw, 0x11F74) && --budget) goto L_5947da59e6321a55; goto out; }
+	goto out;
+L_913b8b540cd5c5dd:
+	s.instructions += 3;
+	s.pc = 0x11F60; op_ilhu(s, 0x41402083u);
+	s.pc = 0x11F64; op_iohl(s, 0x60848083u);
+	s.pc = 0x11F68; op_br(s, 0x32000180u);
 	if (s.pc == 0x11F74) { if (s.can_chain(cw, 0x11F74) && --budget) goto L_5947da59e6321a55; goto out; }
 	goto out;
 L_29135c75939c050d:

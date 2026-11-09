@@ -83,6 +83,7 @@ std::atomic<u32> g_ready_calls[16];
 SPUThread* g_worker_spu[8] = {};   // diagnostics
 std::atomic<u64> g_task_interp{0};  // instructions the SPURS tasks ran in the interpreter (summed when each task ends)
 std::atomic<u64> g_task_runs{0}, g_task_usec{0};   // SPURS task runs and their time (SPURS report)
+std::atomic<u64> g_worker_since[8];   // diagnostics: when each SPU worker's current workload run started (0 = none)
 std::atomic<u64> g_worker_busy[8];   // profiling: microseconds each SPU worker spent running workloads   // cellSpursReadyCountStore calls per workload (diagnostics)   // SPU currently running each workload (diagnostics)
 
 // true if another workload has signalled work (ready count > 0) and has no SPU. Workloads that are
@@ -269,6 +270,34 @@ void spu_profiler(u32 n) {
     LOG_I("spu profile by part:%s", s.c_str());
 }
 
+// Diagnostics: a workload run longer than 1 s (the 6-CPU rain stall, 2026-11-09: main waited 4.9 s on a queue while
+// four SPUs polled in job code) logs each long-running worker's pc and reservation line once per run, and the first
+// few save the worker's LS (long_run_w<k>_<n>.bin). Called by the other workers between runs.
+static void check_long_runs() {
+    static std::atomic<u64> next{0};
+    const u64 now = time_usec();
+    u64 nx = next.load(std::memory_order_relaxed);
+    if (now < nx || !next.compare_exchange_strong(nx, now + 200000)) return;
+    static u64 logged_since[8] = {};
+    static int dumps = 0;
+    for (u32 k = 0; k < 8; k++) {
+        const u64 since = g_worker_since[k].load(std::memory_order_relaxed);
+        SPUThread* t = g_worker_spu[k];
+        if (!since || !t || since > now || now - since < 1000000 || logged_since[k] == since) continue;
+        logged_since[k] = since;
+        std::string line;
+        for (u32 i = 0; i < 128; i += 4) { char b[12]; snprintf(b, sizeof(b), "%s%08x", i % 32 ? " " : " | ", ld32(t->res_addr + i)); line += b; }
+        LOG_W("long run: spu%u in wkl %d for %.1f s, pc=%05x instructions=%llu interp=%llu reservation %d @%08x:%s", k,
+              g_worker_wid[k].load(), (now - since) / 1e6, t->pc, (unsigned long long)t->instructions,
+              (unsigned long long)t->st_interp, t->has_reservation, t->res_addr, line.c_str());
+        if (dumps < 8) {
+            char name[48];
+            snprintf(name, sizeof(name), "long_run_w%u_%d.bin", k, dumps++);
+            if (FILE* f = fopen(name, "wb")) { fwrite(t->ls, 1, 0x40000, f); fclose(f); }
+        }
+    }
+}
+
 void spu_worker(u32 num) {
     set_thread_name(("spu w" + std::to_string(num)).c_str());
     place_thread(2);
@@ -351,9 +380,12 @@ void spu_worker(u32 num) {
         idle_since = 0;
         u64 run_t0 = time_usec();
         g_worker_wid[num & 7].store(wid, std::memory_order_relaxed);
+        g_worker_since[num & 7].store(run_t0, std::memory_order_relaxed);
         joblist_kick((u32)w.arg, num << 12 | rule << 8 | ready_at_pick);
         u64 n = run_workload(*spu, (u32)wid, w);
+        g_worker_since[num & 7].store(0, std::memory_order_relaxed);
         g_worker_wid[num & 7].store(-1, std::memory_order_relaxed);
+        check_long_runs();
         if (w.runs < 8) {   // diagnostics: rarely run workloads (the pit-entry job manager)
             LOG_I("SPURS wkl %d run %llu on spu%u ended after %llu instructions", wid, (unsigned long long)w.runs + 1, num,
                   (unsigned long long)n);

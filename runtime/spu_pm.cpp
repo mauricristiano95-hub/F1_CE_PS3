@@ -1154,3 +1154,20 @@ static void wait_jobs(u32 q, u32 below, bool reset_next) {
 void jobwait_551228(PPUContext& c) { wait_jobs(ld32((u32)c.r[3] + 4), (u32)c.r[4] & 0xFFFF, false); }   // r4 = target
 void jobwait_55127c(PPUContext& c) { wait_jobs(ld32((u32)c.r[3] + 4), 0x10000, true); }                 // every job
 void jobwait_5513b8(PPUContext& c) { wait_jobs(ld32((u32)c.r[3] + 4), ld16((u32)c.r[3] + 38), true); }
+// fn 0x551410 (before its blr): the non-blocking form of these waits, called only by the music stream's MP3 decoder
+// (fn 0x536a0c, which polls it with 200 us sleeps after pushing a decode job). r3 = 1 when the per-SPU halfwords are
+// past r7 (the first free entry), r8 = the queue line. The same gap as above let it report a just-grabbed decode job as
+// done: the stream read the job's sample count before the job wrote it and once got -12, so the copy into the music
+// ring (fn 0xb3a7c) ran off the end of user memory at 0x40000000 (crash after a 2-hour session, 2026-11-09). A job
+// still taken and unfinished keeps the answer at "not done"; the decoder polls again.
+void jobpoll_551410(PPUContext& c) {
+    if (!c.r[3] || !job_inflight((u32)c.r[8], (u32)c.r[7] & 0xFFFF)) return;
+    c.r[3] = 0;
+    static std::atomic<u64> held{0}, window{0};
+    held++;
+    const u64 now = time_usec();
+    u64 w = window.load();
+    if (now - w >= 5000000 && window.compare_exchange_strong(w, now))
+        LOG_I("job polls: MP3 decode job held back %llu times since the last report (taken, not finished)",
+              (unsigned long long)held.exchange(0));
+}

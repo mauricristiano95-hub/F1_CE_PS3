@@ -158,18 +158,22 @@ local function quitMove(self, dir)
     return false
   end
   if Q.focused then
-    -- leave the button: down wraps to the first item, up to the last
+    -- leave the button. The current item is still the one the button was taken from, its enlarged font and position
+    -- untouched: on in the same direction is the menu's own move (it wraps to the other end), back re-highlights it
+    -- without a move. updateItemHighlight shifts the current and previous items by relative offsets (MainMenu's
+    -- enlarged font), so a move from any other item would leave labels displaced, more on every round trip.
+    local back = (dir > 0) ~= (S.dir > 0)
     unfocus()
+    if not back then
+      return false
+    end
     local cur = self.mMenuObjects[self.mCurrentMenuItem]
-    if cur ~= nil and cur.mState == 1 then
-      cur:setState(0)
+    if cur ~= nil and cur.mState == 0 then
+      cur:setState(1)
     end
-    if dir > 0 then
-      self.mCurrentMenuItem = self.mMenuItemCount
-    else
-      self.mCurrentMenuItem = 1
-    end
-    return false
+    self.mPreviousMenuItem = self.mCurrentMenuItem
+    sfx.play(sfx.move)
+    return true
   end
   if not visible() or not atEnd(self, dir) then
     return false
@@ -182,6 +186,7 @@ local function quitMove(self, dir)
   self.mPreviousMenuItem = self.mCurrentMenuItem
   Q.focused = true
   S.menu = self
+  S.dir = dir
   setArrows(self, false)
   sfx.play(sfx.move)
   -- stack from getfenv: pcall, hookScreen, quitMove, pcall, the wrapper, the class's moveSelection, the screen
