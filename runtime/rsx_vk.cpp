@@ -1253,23 +1253,28 @@ Img* upload_texture(u32 unit, bool* is_surface, int* depth_func) {
     u32 levels = std::max(1u, (format >> 16) & 0xF);
     if (linear && !dxt) levels = 1;
     levels = std::min(levels, ilog2(std::max(w, h)) + 1);
+    // texture resolution option: the image starts at guest level `drop` (tex_levels_dropped)
+    const u32 drop = tex_levels_dropped(w, h, levels, fmt, main_mem);
+    u32 skip = 0;
+    for (u32 l = 0; l < drop; l++) skip += tex_level_bytes(w, h, l, base_fmt, bpp);
+    const u32 iw = w >> drop, ih = h >> drop, ilevels = levels - drop;
     // a new image each time: draws already recorded in this frame keep sampling the old one
     if (te.tex) destroy_image(te.tex);
     VkFormat vf = base_fmt == 0x86 ? VK_FORMAT_BC1_RGBA_UNORM_BLOCK : base_fmt == 0x87 ? VK_FORMAT_BC2_UNORM_BLOCK : base_fmt == 0x88 ? VK_FORMAT_BC3_UNORM_BLOCK : COLOR_FMT;
-    te.tex = make_image(w, h, levels, vf, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (dxt ? 0 : VK_IMAGE_USAGE_STORAGE_BIT));
+    te.tex = make_image(iw, ih, ilevels, vf, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (dxt ? 0 : VK_IMAGE_USAGE_STORAGE_BIT));
     te.w = w; te.h = h; te.fmt = fmt;
     u64 tc = prof_usec();
     if (!dxt) {
         u32 total = 0;
-        for (u32 l = 0; l < levels; l++) {
-            u32 lw = std::max(1u, w >> l), lh = std::max(1u, h >> l);
+        for (u32 l = 0; l < ilevels; l++) {
+            u32 lw = std::max(1u, iw >> l), lh = std::max(1u, ih >> l);
             total += linear ? (pitch ? pitch * (lh - 1) + lw * bpp : lw * lh * bpp) : lw * lh * bpp;
         }
-        decode_levels(te.tex, base_fmt, linear, pitch, bpp, gmem(ea), total, levels);
+        decode_levels(te.tex, base_fmt, linear, pitch, bpp, gmem(ea + skip), total, ilevels);
     } else {
-        u32 off = 0;
-        for (u32 l = 0; l < levels; l++) {
-            u32 lw = std::max(1u, w >> l), lh = std::max(1u, h >> l);
+        u32 off = skip;
+        for (u32 l = 0; l < ilevels; l++) {
+            u32 lw = std::max(1u, iw >> l), lh = std::max(1u, ih >> l);
             u32 lsize = ((lw + 3) / 4) * ((lh + 3) / 4) * (base_fmt == 0x86 ? 8 : 16);
             VkBuffer buf;
             ptrdiff_t soff;
@@ -1298,7 +1303,7 @@ Img* cube_texture(u32 u) {
     struct CubeEntry { Img* tex = nullptr; u32 w = 0, pw = 0; u64 seq[6] = {}, checked_seq = ~0ull; };
     static std::unordered_map<u32, CubeEntry> cubes;
     CubeEntry& ce = cubes[offset];
-    const u32 pw = scaled(w, std::max(res_scale_x(), res_scale_y()));
+    const u32 pw = scaled(w, std::max(target_scale_x(w, w), target_scale_y(w, w)));
     if (!ce.tex || ce.w != w) {
         if (ce.tex) destroy_image(ce.tex);
         ce.tex = make_image(pw, pw, 1, COLOR_FMT, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_SAMPLE_COUNT_1_BIT, true);
@@ -1807,10 +1812,9 @@ void zpass_resolve() {
     for (Slot& s : g_slots) if (!s.qread && s.serial && s.serial <= g_completed) slot_read_queries(s);
     while (!g_zpass.pending.empty() && g_zpass.pending.front().serial <= g_completed) {
         auto& p = g_zpass.pending.front();
-        u32 total = 0;
+        u64 total = 0;
         for (u64 id : p.spans) total += g_qres[id & (QRES - 1)];
-        total = (u32)(total / (res_scale_x() * res_scale_y()));
-        st32(p.ea + 8, total);
+        st32(p.ea + 8, zpass_value(p.ea, total));
         g_zpass.pending.pop_front();
     }
 }

@@ -1206,19 +1206,24 @@ GLuint upload_texture(u32 unit, bool* is_surface, int* depth_func) {
     // (DXT: block rows; swizzled: each level swizzled at its own size). Linear pitched textures keep level 0.
     u32 levels = std::max(1u, (format >> 16) & 0xF);
     if (linear && !dxt) levels = 1;
+    // texture resolution option: the GL texture starts at guest level `drop` (tex_levels_dropped)
+    const u32 drop = tex_levels_dropped(w, h, levels, fmt, main_mem);
+    const u32 lea0 = [&] { u32 a = ea; for (u32 l = 0; l < drop; l++) a += tex_level_bytes(w, h, l, base_fmt, bpp); return a; }();
+    const u32 iw = w >> drop, ih = h >> drop;
+    levels -= drop;
     u32 off = 0;
     if (!dxt && tex_gpu()) {
         u32 total = 0;   // the bytes of all levels (they follow level 0 contiguously)
         for (u32 l = 0; l < levels; l++) {
-            u32 lw = std::max(1u, w >> l), lh = std::max(1u, h >> l);
+            u32 lw = std::max(1u, iw >> l), lh = std::max(1u, ih >> l);
             total += linear ? (pitch ? pitch * (lh - 1) + lw * bpp : lw * lh * bpp) : lw * lh * bpp;
         }
         u64 tc = prof_usec();
         glBindBuffer(GL_TEXTURE_BUFFER, g_tex_staging);
-        glBufferData(GL_TEXTURE_BUFFER, (total + 3) & ~3u, gmem(ea), GL_STREAM_DRAW);   // (a new store: no wait)
+        glBufferData(GL_TEXTURE_BUFFER, (total + 3) & ~3u, gmem(lea0), GL_STREAM_DRAW);   // (a new store: no wait)
         glUseProgram(g_tex_cs);
         for (u32 l = 0; l < levels; l++) {
-            u32 lw = std::max(1u, w >> l), lh = std::max(1u, h >> l);
+            u32 lw = std::max(1u, iw >> l), lh = std::max(1u, ih >> l);
             glTexImage2D(GL_TEXTURE_2D, (GLint)l, GL_RGBA8, (GLsizei)lw, (GLsizei)lh, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
             glBindImageTexture(0, te.tex, (GLint)l, GL_FALSE, 0, 0x88B9 /*GL_WRITE_ONLY*/, GL_RGBA8);
             const GLint lvl[4] = {(GLint)off, (GLint)lw, (GLint)lh, (GLint)base_fmt};
@@ -1236,8 +1241,8 @@ GLuint upload_texture(u32 unit, bool* is_surface, int* depth_func) {
     u64 tcpu = prof_usec();
     bool cpu_decode = !dxt && !tex_gpu();
     for (u32 l = 0; l < levels && (dxt || !tex_gpu()); l++) {
-        u32 lw = std::max(1u, w >> l), lh = std::max(1u, h >> l);
-        u32 lea = ea + off;
+        u32 lw = std::max(1u, iw >> l), lh = std::max(1u, ih >> l);
+        u32 lea = lea0 + off;
         if (dxt) {
             GLenum gf = base_fmt == 0x86 ? 0x83F1 /*DXT1 RGBA*/ : base_fmt == 0x87 ? 0x83F2 /*DXT3*/ : 0x83F3 /*DXT5*/;
             u32 lsize = ((lw + 3) / 4) * ((lh + 3) / 4) * (base_fmt == 0x86 ? 8 : 16);
@@ -1290,7 +1295,7 @@ GLuint cube_texture(u32 u) {
     static std::unordered_map<u32, CubeEntry> cubes;
     static GLuint blit_fbo = 0;
     CubeEntry& ce = cubes[offset];
-    const u32 pw = scaled(w, std::max(res_scale_x(), res_scale_y()));   // faces at the scale of the render targets they come from (square)
+    const u32 pw = scaled(w, std::max(target_scale_x(w, w), target_scale_y(w, w)));   // faces at the scale of the render targets they come from (square)
     if (!ce.tex || ce.w != w) {
         if (!ce.tex) glGenTextures(1, &ce.tex);
         glBindTexture(GL_TEXTURE_CUBE_MAP, ce.tex);
@@ -2551,12 +2556,9 @@ void zpass_resolve() {
         return result[q] = v;
     };
     for (auto& p : g_zpass.pending) {
-        u32 total = 0;
+        u64 total = 0;
         for (GLuint q : p.spans) total += value(q);
-        total = (u32)(total / (res_scale_x() * res_scale_y()));   // (the counted targets are scaled local ones)
-        st32(p.ea + 8, total);
-        static const bool zlog = getenv("F1CE_ZPASS_LOG") != nullptr;   // debug
-        if (zlog && g_frame % 300 == 0) LOG_I("zpass report @%08x = %u (%zu spans)", p.ea, total, p.spans.size());
+        st32(p.ea + 8, zpass_value(p.ea, total));
     }
     g_zpass.pending.clear();
     for (auto& l : g_zpass.retired) g_zpass.free_q.insert(g_zpass.free_q.end(), l.begin(), l.end());

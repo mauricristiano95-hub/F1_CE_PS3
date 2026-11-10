@@ -1,5 +1,6 @@
 // PS3 path mapping and file I/O on the host file system.
 #include "lv2_fs.h"
+#include "mods.h"
 
 #include <cstdio>
 #include <filesystem>
@@ -15,6 +16,8 @@ enum : s32 {
 struct File {
     FILE* f = nullptr;
     std::string path;
+    std::shared_ptr<mods::VirtualFile> vf;   // an archive changed by the mod pack (f stays null)
+    u64 vpos = 0;
 };
 struct Dir {
     std::vector<std::pair<std::string, bool>> entries;   // name, is_dir
@@ -86,6 +89,21 @@ s32 open(const std::string& path, s32 flags, u32 fd_out) {
     if (exists && (flags & O_CREAT) && (flags & O_EXCL)) return CELL_EEXIST;
     const char* mode = "rb";
     int acc = flags & O_ACCMODE;
+    if (acc == 0 && exists) {
+        std::string repl = mods::loose_override(host);
+        if (!repl.empty()) {
+            host = repl;
+            hp = stdfs::u8path(host);
+        }
+        if (std::shared_ptr<mods::VirtualFile> vf = mods::open_wad(host)) {
+            std::lock_guard lk(g_fs_mutex);
+            u32 fd = g_next_fd++;
+            g_files[fd] = {nullptr, path, std::move(vf)};
+            st32(fd_out, fd);
+            LOG_I("fs open: %s flags=%x -> fd %u (mod pack archive)", path.c_str(), flags, fd);
+            return CELL_OK;
+        }
+    }
     if (acc != 0) {
         if (!exists || (flags & O_TRUNC)) mode = acc == O_WRONLY ? "wb" : "w+b";
         else mode = (flags & O_APPEND) ? "a+b" : "r+b";
@@ -109,7 +127,12 @@ s32 read(u32 fd, u32 buf, u64 size, u32 nread_out) {
     std::lock_guard lk(g_fs_mutex);
     auto it = g_files.find(fd);
     if (it == g_files.end()) return CELL_EBADF;
-    size_t n = fread(gmem(buf), 1, (size_t)size, it->second.f);
+    File& fl = it->second;
+    size_t n;
+    if (fl.vf) {
+        n = fl.vf->read(fl.vpos, gmem(buf), (size_t)size);
+        fl.vpos += n;
+    } else n = fread(gmem(buf), 1, (size_t)size, fl.f);
     if (nread_out) st64(nread_out, n);
     return CELL_OK;
 }
@@ -118,6 +141,7 @@ s32 write(u32 fd, u32 buf, u64 size, u32 nwrite_out) {
     std::lock_guard lk(g_fs_mutex);
     auto it = g_files.find(fd);
     if (it == g_files.end()) return CELL_EBADF;
+    if (it->second.vf) return CELL_EBADF;   // opened read-only
     size_t n = fwrite(gmem(buf), 1, (size_t)size, it->second.f);
     if (nwrite_out) st64(nwrite_out, n);
     return CELL_OK;
@@ -127,7 +151,7 @@ s32 close(u32 fd) {
     std::lock_guard lk(g_fs_mutex);
     auto it = g_files.find(fd);
     if (it == g_files.end()) return CELL_EBADF;
-    fclose(it->second.f);
+    if (it->second.f) fclose(it->second.f);
     g_files.erase(it);
     return CELL_OK;
 }
@@ -136,6 +160,13 @@ s32 lseek(u32 fd, s64 offset, u32 whence, u32 pos_out) {
     std::lock_guard lk(g_fs_mutex);
     auto it = g_files.find(fd);
     if (it == g_files.end()) return CELL_EBADF;
+    if (File& fl = it->second; fl.vf) {
+        s64 pos = offset + (whence == 0 ? 0 : whence == 1 ? (s64)fl.vpos : (s64)fl.vf->size());
+        if (pos < 0) return CELL_EINVAL;
+        fl.vpos = (u64)pos;
+        if (pos_out) st64(pos_out, (u64)pos);
+        return CELL_OK;
+    }
     int w = whence == 0 ? SEEK_SET : whence == 1 ? SEEK_CUR : SEEK_END;
 #ifdef _WIN32
     if (_fseeki64(it->second.f, offset, w)) return CELL_EINVAL;
@@ -149,10 +180,19 @@ s32 lseek(u32 fd, s64 offset, u32 whence, u32 pos_out) {
 }
 
 s32 stat(const std::string& path, u32 out) {
-    stdfs::path hp = stdfs::u8path(fs_host_path(path));
+    std::string host = fs_host_path(path);
+    stdfs::path hp = stdfs::u8path(host);
     std::error_code ec;
     if (!stdfs::exists(hp, ec)) return CELL_ENOENT;
     bool dir = stdfs::is_directory(hp, ec);
+    if (!dir) {
+        std::string repl = mods::loose_override(host);
+        if (!repl.empty()) hp = stdfs::u8path(host = repl);
+        if (s64 vs = mods::wad_size(host); vs >= 0) {
+            write_stat(out, false, (u64)vs);
+            return CELL_OK;
+        }
+    }
     write_stat(out, dir, dir ? 0 : (u64)stdfs::file_size(hp, ec));
     return CELL_OK;
 }
@@ -163,6 +203,10 @@ s32 fstat(u32 fd, u32 out) {
         std::lock_guard lk(g_fs_mutex);
         auto it = g_files.find(fd);
         if (it == g_files.end()) return CELL_EBADF;
+        if (it->second.vf) {
+            write_stat(out, false, it->second.vf->size());
+            return CELL_OK;
+        }
         fflush(it->second.f);
         path = it->second.path;
     }

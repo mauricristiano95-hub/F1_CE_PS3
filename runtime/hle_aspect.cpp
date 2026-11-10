@@ -45,14 +45,19 @@ bool res_scaled() { return res_scale_x() != 1 || res_scale_y() != 1; }
 // The shadow maps (the game's 1024x2048 depth targets, no other target has that size) follow the internal resolution
 // like every target, or with F1CE_SHADOW_RES=<k> are k times their original size whatever it is (0.5 = 512x1024, a
 // lighter GPU load; 2 = 2048x4096, sharper edges). Their depth buffers take the same scale (get_depth).
+// The reflection cube map's faces (the only 256x256 targets in races, and their shared depth buffer) likewise with
+// F1CE_CUBE_RES=<k> (0.5 = 128x128, 2 = 512x512); the cube textures built from them take the faces' size.
 namespace {
-float shadow_res() {
-    static const float v = getenv("F1CE_SHADOW_RES") ? std::clamp((float)atof(getenv("F1CE_SHADOW_RES")), 0.25f, 4.0f) : 0;
-    return v;
+float env_res(const char* name) {
+    return getenv(name) ? std::clamp((float)atof(getenv(name)), 0.25f, 4.0f) : 0;
+}
+float fixed_scale(u32 w, u32 h) {
+    static const float shadow = env_res("F1CE_SHADOW_RES"), cube = env_res("F1CE_CUBE_RES");
+    return w == 1024 && h == 2048 ? shadow : w == 256 && h == 256 ? cube : 0;
 }
 }  // namespace
-float target_scale_x(u32 w, u32 h) { return w == 1024 && h == 2048 && shadow_res() ? shadow_res() : res_scale_x(); }
-float target_scale_y(u32 w, u32 h) { return w == 1024 && h == 2048 && shadow_res() ? shadow_res() : res_scale_y(); }
+float target_scale_x(u32 w, u32 h) { const float k = fixed_scale(w, h); return k ? k : res_scale_x(); }
+float target_scale_y(u32 w, u32 h) { const float k = fixed_scale(w, h); return k ? k : res_scale_y(); }
 void video_mode(u8* id, u8* aspect) {
     *id = format().lines == 1 ? 4 : format().lines == 2 ? 5 : 2;
     *aspect = format().narrow ? 1 : 2;

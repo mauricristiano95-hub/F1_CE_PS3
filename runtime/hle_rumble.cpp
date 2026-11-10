@@ -100,6 +100,7 @@ void rumble(u32 ctl, bool active) {
 }  // namespace
 
 void sub_003574C0(PPUContext& __restrict c);
+void ai_drive_update(PPUContext& c, u32 ctl, bool driving);   // hle_aidrive.cpp
 
 // the per-frame controller update (r3 controller, r4 driving); 02.00 vibrates the pad at its end
 bool controller_update_hook(PPUContext& c) {
@@ -112,6 +113,7 @@ bool controller_update_hook(PPUContext& c) {
     inside = true;
     sub_003574C0(c);
     inside = false;
+    if (runs) ai_drive_update(c, ctl, driving);
     if (!runs || strength() <= 0) return true;
     const bool flag = ld8(ctl + 0x15) != 0;
     static int last_flag = -1;

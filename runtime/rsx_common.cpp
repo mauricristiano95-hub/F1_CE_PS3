@@ -1037,6 +1037,34 @@ u32 morton(u32 x, u32 y, u32 log_w, u32 log_h) {
 
 u32 ilog2(u32 v) { u32 r = 0; while ((1u << r) < v) r++; return r; }
 
+u32 tex_levels_dropped(u32 w, u32 h, u32 levels, u32 fmt, bool main_mem) {
+    static const u32 want = getenv("F1CE_TEX_RES") ? (u32)std::clamp(atoi(getenv("F1CE_TEX_RES")), 0, 4) : 0;
+    if (!want || levels < 2 || main_mem || (fmt & 0x60)) return 0;
+    u32 d = 0;
+    while (d < want && levels - d > 1 && (std::min(w, h) >> (d + 1)) >= 32) d++;
+    return d;
+}
+// Counts are per native-resolution pixel (the counted targets are scaled local ones). F1CE_ZPASS_LOG=1 logs a burst
+// of 200 reports every 10 s (report offset, count). (Car models do not choose their detail level from these counts:
+// multiplying them by 0.001 or 1000 changed no draw or vertex count on the grid; see hle_gfxopts.cpp.)
+u32 zpass_value(u32 ea, u64 samples) {
+    static const bool zlog = getenv("F1CE_ZPASS_LOG") != nullptr;
+    static u64 last_burst = 0;
+    static u32 burst = 0;
+    const u32 v = (u32)(samples / (res_scale_x() * res_scale_y()));
+    if (zlog) {
+        const u64 now = time_usec();
+        if (now - last_burst > 10000000) { last_burst = now; burst = 200; }
+        if (burst) { burst--; LOG_I("zpass: %06x %u", ea & 0xFFFFFF, v); }
+    }
+    return v;
+}
+u32 tex_level_bytes(u32 w, u32 h, u32 level, u32 base_fmt, u32 bpp) {
+    const u32 lw = std::max(1u, w >> level), lh = std::max(1u, h >> level);
+    if (base_fmt == 0x86 || base_fmt == 0x87 || base_fmt == 0x88) return ((lw + 3) / 4) * ((lh + 3) / 4) * (base_fmt == 0x86 ? 8 : 16);
+    return lw * lh * bpp;
+}
+
 float half_to_float(u16 h) {
     u32 s = (h >> 15) & 1, e = (h >> 10) & 31, m = h & 1023;
     u32 f;

@@ -6,6 +6,9 @@
 // frame); at 30 per second reflections refresh every other frame at 60 fps and every frame below ~40 fps. The main
 // view's wait for the faces' job fences (0x2F0390) is skipped with the pass, since the fences would then be the
 // previous frame's. F1CE_CUBE_SKIP=1 (experiment) never renders it. Hooks in tools/recomp.py HOOKS.
+// F1CE_CUBE_STATIC=1 (static reflections): the faces are rendered during the first 2 s of a scene and then kept until
+// the next one (a scene starts when the pass was not called for over a second: loading, menus). 2 s and not a single
+// frame, since programs compiled in the background and streamed textures are missing from a scene's first frames.
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
@@ -19,7 +22,9 @@ const u64 g_interval = [] {
     const int hz = e ? atoi(e) : getenv("F1CE_60FPS") ? 30 : 0;
     return hz > 0 ? (u64)(750000 / hz) : 0;
 }();
+const bool g_static = getenv("F1CE_CUBE_STATIC") && atoi(getenv("F1CE_CUBE_STATIC")) != 0;
 u64 g_last_render = 0;
+u64 g_last_call = 0, g_scene_start = 0;
 bool g_skipped = false;   // the last pass was skipped: its fence wait goes too
 u32 g_renders = 0, g_skips = 0;
 u64 g_window = 0;
@@ -37,7 +42,9 @@ void report(u64 now) {
 bool cube_render_hook(PPUContext&) {
     const u64 now = time_usec();
     report(now);
-    g_skipped = g_never || (g_interval && now - g_last_render < g_interval);
+    if (now - g_last_call > 1000000) g_scene_start = now;
+    g_last_call = now;
+    g_skipped = g_never || (g_static ? now - g_scene_start > 2000000 : g_interval && now - g_last_render < g_interval);
     if (g_skipped) { g_skips++; return true; }
     g_last_render = now;
     g_renders++;

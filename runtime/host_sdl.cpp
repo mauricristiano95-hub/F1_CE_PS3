@@ -96,6 +96,7 @@ void update_pad(SDL_Gamepad* gp) {
     if (k[SDL_SCANCODE_KP_MINUS]) dk |= DK_FOV_DOWN;
     if (k[SDL_SCANCODE_KP_0]) dk |= DK_RESET;
     if (k[SDL_SCANCODE_KP_5]) dk |= DK_PRINT;
+    if (k[SDL_SCANCODE_F8]) dk |= DK_AI_TOGGLE;   // F8: AI control of the player's car (F1CE_AI_DRIVE, hle_aidrive.cpp)
     g_debug_keys = dk;
     // digital buttons report full pressure when pressed
     static const struct { int word; u16 bit; int idx; } press[] = {
@@ -181,7 +182,7 @@ void init() {
 }
 
 // Scripted input for automated tests: F1CE_INPUT="12:cross,16.5:down,20:start" presses each button
-// for 200 ms at the given time (seconds since start); "60:r2:120" holds R2 for 120 s.
+// for 200 ms at the given time (seconds since start); "60:r2:120" holds R2 for 120 s; "f8" = the F8 key (debug_keys).
 static std::atomic<u64> input_clock_start{0};
 void input_clock_reset() { input_clock_start = time_usec(); }
 
@@ -195,6 +196,7 @@ std::vector<ScriptedPress> parse_script() {
         {"left", 1, D1_LEFT}, {"right", 1, D1_RIGHT}, {"up", 1, D1_UP}, {"down", 1, D1_DOWN}, {"start", 1, D1_START},
         {"select", 1, D1_SELECT}, {"cross", 2, D2_CROSS}, {"circle", 2, D2_CIRCLE}, {"square", 2, D2_SQUARE},
         {"triangle", 2, D2_TRIANGLE}, {"l1", 2, D2_L1}, {"r1", 2, D2_R1}, {"l2", 2, D2_L2}, {"r2", 2, D2_R2},
+        {"f8", 0, (u16)DK_AI_TOGGLE},   // word 0: a debug key
     };
     std::string s = env;
     size_t pos = 0;
@@ -216,9 +218,19 @@ std::vector<ScriptedPress> parse_script() {
     LOG_I("host: %zu scripted button presses", v.size());
     return v;
 }
+const std::vector<ScriptedPress>& script() {
+    static const std::vector<ScriptedPress> s = parse_script();
+    return s;
+}
 }  // namespace
 
-u32 debug_keys() { return g_debug_keys; }
+u32 debug_keys() {
+    u32 dk = g_debug_keys;
+    const double now = (time_usec() - input_clock_start.load()) / 1e6;
+    for (auto& e : script())
+        if (e.word == 0 && now >= e.t && now < e.t + e.dur) dk |= e.bit;
+    return dk;
+}
 
 void pad_rumble(float low, float high) {
     auto q = [](float v) { return (u32)std::lround(std::clamp(v, 0.0f, 1.0f) * 65535.0f); };
@@ -226,7 +238,6 @@ void pad_rumble(float low, float high) {
 }
 
 PadState pad_state() {
-    static const std::vector<ScriptedPress> script = parse_script();
     PadState p;
     {
         std::lock_guard lk(g_pad_mutex);
@@ -284,8 +295,8 @@ PadState pad_state() {
             next++;
         }
     }
-    for (auto& e : script)
-        if (now >= e.t && now < e.t + e.dur) {
+    for (auto& e : script())
+        if (e.word != 0 && now >= e.t && now < e.t + e.dur) {
             if (e.word == 1) p.digital1 |= e.bit;
             else p.digital2 |= e.bit;
             // full pressure too: the game reads analog values (the throttle is the pressure of cross)

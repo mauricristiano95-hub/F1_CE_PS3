@@ -64,6 +64,11 @@ Combo g_combos[] = {
     {L"Window size", L"F1CE_WINDOW",
      {{L"1280x720", nullptr}, {L"1600x900", L"1600x900"}, {L"1920x1080", L"1920x1080"}, {L"2560x1440", L"2560x1440"}}, 0, VIDEO},
     {L"Vertical sync", L"F1CE_VSYNC", {{L"On", nullptr}, {L"Off", L"0"}, {L"Adaptive", L"-1"}}, 0, VIDEO},
+    // launcher only (not passed to the game): sets the options of PRESET_ENVS (g_presets); "Custom" keeps the
+    // player's own values, saved in the ini's [custom preset] section
+    {L"Graphics preset", L"preset",
+     {{L"Original (PS3)", L"original"}, {L"Low", L"low"}, {L"Medium", L"medium"}, {L"High", L"high"},
+      {L"Custom", L"custom"}}, 0, VIDEO},
     {L"Anti-aliasing (MSAA)", L"F1CE_MSAA", {{L"2x", L"2"}, {L"4x (original)", nullptr}, {L"8x", L"8"}}, 1, VIDEO},
     {L"Shadow map resolution", L"F1CE_SHADOW_RES",
      {{L"512x1024 (low)", L"0.5"}, {L"1024x2048 (original)", L"1"}, {L"Internal resolution", nullptr},
@@ -72,6 +77,20 @@ Combo g_combos[] = {
     {L"Reflection updates", L"F1CE_CUBE_HZ",
      {{L"30 per second (original)", nullptr}, {L"Every frame", L"0"}, {L"20 per second", L"20"}, {L"15 per second", L"15"},
       {L"10 per second", L"10"}}, 0, VIDEO},
+    // the cube map faces (256x256 targets), like the shadow maps (runtime/hle_aspect.cpp)
+    {L"Reflection resolution", L"F1CE_CUBE_RES",
+     {{L"128x128 (low)", L"0.5"}, {L"256x256 (medium, original)", L"1"}, {L"Internal resolution", nullptr},
+      {L"512x512 (high)", L"2"}}, 2, VIDEO},
+    // mip levels left out of mipmapped textures (runtime/rsx_common.cpp tex_levels_dropped)
+    {L"Texture resolution", L"F1CE_TEX_RES",
+     {{L"High (original)", nullptr}, {L"Medium (half size)", L"1"}, {L"Low (quarter size)", L"2"}}, 0, VIDEO},
+    // what the game draws (runtime/hle_gfxopts.cpp): the distances of the car models' detail levels (15, 25, 50 m)
+    // and two effects it can do without
+    {L"Car detail distance", L"F1CE_CAR_LOD",
+     {{L"Near (x0.5, lighter)", L"0.5"}, {L"Original (15/25/50 m)", nullptr}, {L"Far (x2)", L"2"},
+      {L"Very far (x4)", L"4"}}, 1, VIDEO},
+    {L"Motion blur", L"F1CE_MOTION_BLUR", {{L"On (original)", nullptr}, {L"Off", L"0"}}, 0, VIDEO},
+    {L"Heat haze behind the cars", L"F1CE_HEAT_HAZE", {{L"On (original)", nullptr}, {L"Off", L"0"}}, 0, VIDEO},
     // with "Up to 60 fps": a steady 30 on machines that cannot hold 60 (Steam Deck), with that mode's pacing
     // (runtime/hle_gcm.cpp pace_ticks)
     {L"60 fps mode cap", L"F1CE_FPS_CAP", {{L"None", nullptr}, {L"30 fps", L"30"}, {L"45 fps", L"45"}}, 0, GAME},
@@ -89,6 +108,8 @@ Combo g_combos[] = {
     {L"Language", L"F1CE_LANGUAGE",
      {{L"English", nullptr}, {L"Français", L"french"}, {L"Deutsch", L"german"}, {L"Italiano", L"italian"},
       {L"Español", L"spanish"}, {L"Português", L"portuguese"}, {L"Suomi", L"finnish"}}, 0, GAME},
+    // the folders of MODS next to the launcher, added at start (add_season_packs; runtime/mods.cpp)
+    {L"Season pack (MODS folder)", L"F1CE_MOD_PACK", {{L"None (original game)", nullptr}}, 0, GAME},
     // Quick Race Settings (runtime/hle_quickrace.cpp): "Game menu" leaves the variable unset
     {L"Circuit", L"F1CE_QR_TRACK",
      {{L"Game menu", nullptr}, {L"Bahrain (Sakhir)", L"bahrain"}, {L"Malaysia (Sepang)", L"malaysia"},
@@ -122,12 +143,31 @@ Combo g_combos[] = {
     {L"Penalties", L"F1CE_QR_PENALTIES", {{L"Game menu", nullptr}, {L"Off", L"0"}, {L"On", L"1"}}, 0, QR_RULES},
     // Developer Tools
     {L"F1CE_PIN", L"F1CE_PIN", {{L"Default", nullptr}, {L"0: no pinning", L"0"}, {L"1: main PPU too", L"1"}}, 0, DEV_TIMING},
+    // the AI drives the player's car, as after a black flag (runtime/hle_aidrive.cpp): F8 toggles it in a race
+    {L"F1CE_AI_DRIVE", L"F1CE_AI_DRIVE",
+     {{L"Off", nullptr}, {L"F8 toggles AI driving", L"key"}, {L"AI from the start (F8 toggles)", L"0"}}, 0, DEV_VALUES2},
 };
+
+// graphics presets: values of the PRESET_ENVS combos (nullptr: the default choice); the order of the "preset" combo,
+// Custom last. Measured on the 1080p grid (2026-11-10): Low/Medium/Original within noise, High ~-9 fps in 60 fps mode
+const wchar_t* const PRESET_KEY = L"preset";
+const wchar_t* const PRESET_ENVS[] = {L"F1CE_MSAA",   L"F1CE_SHADOW_RES", L"F1CE_CUBE_HZ",     L"F1CE_CUBE_RES",
+                                      L"F1CE_TEX_RES", L"F1CE_CAR_LOD",    L"F1CE_MOTION_BLUR", L"F1CE_HEAT_HAZE"};
+constexpr int PRESET_N = sizeof(PRESET_ENVS) / sizeof(PRESET_ENVS[0]);
+const wchar_t* const g_presets[][PRESET_N] = {
+    {nullptr, L"1", nullptr, L"1", nullptr, nullptr, nullptr, nullptr},     // Original
+    {L"2", L"0.5", L"15", L"0.5", L"2", L"0.5", L"0", L"0"},                // Low
+    {L"2", L"1", L"20", L"1", L"1", nullptr, nullptr, nullptr},             // Medium
+    {L"8", L"2", L"0", L"2", nullptr, L"2", nullptr, nullptr},              // High
+};
+constexpr int PRESET_CUSTOM = sizeof(g_presets) / sizeof(g_presets[0]);
+const wchar_t* const CUSTOM_SECTION = L"custom preset";
 
 Check g_checks[] = {
     {L"FXAA on the final image", L"F1CE_FXAA", VIDEO},
     {L"Start in full screen (F11 toggles it)", L"F1CE_FULLSCREEN", VIDEO},
     {L"Stretch to the window instead of keeping the aspect ratio", L"F1CE_STRETCH", VIDEO},
+    {L"Static reflections (drawn once when a race scene starts, saves CPU time)", L"F1CE_CUBE_STATIC", VIDEO},
     {L"Up to 60 fps (game speed unchanged)", L"F1CE_60FPS", GAME,
      L"Experimental:|flashing shadows, odd pit stop animations, broken replay and ghost car behaviour. "
      L"Turn it off if anything goes wrong."},
@@ -230,6 +270,71 @@ std::wstring window_text(HWND h) {
 }
 bool checked(const Check& c) { return SendMessageW(c.h, BM_GETCHECK, 0, 0) == BST_CHECKED; }
 
+std::wstring mods_dir() { return g_exe_dir + L"\\MODS"; }
+
+// one choice per folder of MODS: the folder name is the pack's name and the variable's value
+void add_season_packs() {
+    static std::vector<std::wstring> names;   // (the choices point into it)
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    for (const auto& e : fs::directory_iterator(fs::path(mods_dir()), ec))
+        if (e.is_directory(ec) && e.path().filename().wstring()[0] != L'.') names.push_back(e.path().filename().wstring());
+    std::sort(names.begin(), names.end());
+    for (Combo& c : g_combos)
+        if (!wcscmp(c.env, L"F1CE_MOD_PACK"))
+            for (const std::wstring& n : names) c.choices.push_back({n.c_str(), n.c_str()});
+}
+
+Combo* find_combo(const wchar_t* env) {
+    for (Combo& c : g_combos)
+        if (!wcscmp(c.env, env)) return &c;
+    return nullptr;
+}
+int selection(const Combo& c) { return (int)SendMessageW(c.h, CB_GETCURSEL, 0, 0); }
+const wchar_t* selected_value(const Combo& c) { return c.choices[selection(c)].value; }
+// selects the choice with this value (nullptr: the unset one); unknown values leave the selection alone
+void select_value(Combo& c, const wchar_t* v) {
+    for (size_t i = 0; i < c.choices.size(); i++)
+        if (v ? c.choices[i].value && !wcscmp(c.choices[i].value, v) : !c.choices[i].value) {
+            SendMessageW(c.h, CB_SETCURSEL, i, 0);
+            return;
+        }
+}
+bool is_preset_option(HWND h) {
+    for (const wchar_t* e : PRESET_ENVS)
+        if (find_combo(e)->h == h) return true;
+    return false;
+}
+// the preset the current options match, else PRESET_CUSTOM
+int matching_preset() {
+    for (int p = 0; p < PRESET_CUSTOM; p++) {
+        bool same = true;
+        for (int i = 0; i < PRESET_N && same; i++) {
+            const wchar_t *v = selected_value(*find_combo(PRESET_ENVS[i])), *pv = g_presets[p][i];
+            same = v && pv ? !wcscmp(v, pv) : v == pv;
+        }
+        if (same) return p;
+    }
+    return PRESET_CUSTOM;
+}
+// custom values: "" for the unset choice (a missing key: never saved)
+void save_custom() {
+    for (const wchar_t* e : PRESET_ENVS) {
+        const wchar_t* v = selected_value(*find_combo(e));
+        WritePrivateProfileStringW(CUSTOM_SECTION, e, v ? v : L"", g_ini.c_str());
+    }
+}
+void apply_preset(int p) {
+    if (p < PRESET_CUSTOM) {
+        for (int i = 0; i < PRESET_N; i++) select_value(*find_combo(PRESET_ENVS[i]), g_presets[p][i]);
+        return;
+    }
+    wchar_t b[64];
+    for (const wchar_t* e : PRESET_ENVS)
+        if (GetPrivateProfileStringW(CUSTOM_SECTION, e, L"?", b, 64, g_ini.c_str()), wcscmp(b, L"?"))
+            select_value(*find_combo(e), b[0] ? b : nullptr);
+}
+
 void load_settings() {
     wchar_t b[MAX_PATH * 2];
     std::wstring def = full_path(parent(g_exe_dir) + L"\\..\\F1_CE_PS3_og\\PS3_GAME");
@@ -241,6 +346,12 @@ void load_settings() {
         for (size_t i = 0; i < c.choices.size(); i++)
             if (c.choices[i].value && !wcscmp(c.choices[i].value, b)) sel = (int)i;
         SendMessageW(c.h, CB_SETCURSEL, sel, 0);
+    }
+    {   // a named preset whose options were changed in the ini (or an ini from before presets) shows what matches
+        Combo& preset = *find_combo(PRESET_KEY);
+        if (selection(preset) != PRESET_CUSTOM && matching_preset() != selection(preset))
+            SendMessageW(preset.h, CB_SETCURSEL, matching_preset(), 0);
+        if (selection(preset) == PRESET_CUSTOM) save_custom();   // (what Custom gives back after trying a preset)
     }
     for (Check& c : g_checks)
         SendMessageW(c.h, BM_SETCHECK, GetPrivateProfileIntW(L"options", c.env, 0, g_ini.c_str()) ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -258,6 +369,7 @@ void save_settings() {
         const wchar_t* v = c.choices[SendMessageW(c.h, CB_GETCURSEL, 0, 0)].value;   // (nullptr deletes the key: default)
         WritePrivateProfileStringW(L"options", c.env, v, g_ini.c_str());
     }
+    if (selection(*find_combo(PRESET_KEY)) == PRESET_CUSTOM) save_custom();
     for (Check& c : g_checks) WritePrivateProfileStringW(L"options", c.env, checked(c) ? L"1" : L"0", g_ini.c_str());
     for (Field& f : g_fields) {
         const std::wstring v = window_text(f.h);
@@ -286,7 +398,8 @@ void start_game() {
     std::wstring cmd = L"\"" + exe + L"\" \"" + game + L"\"";
     // the variable is cleared when unset here: some options act as soon as it exists, whatever its value
     for (Combo& c : g_combos)
-        SetEnvironmentVariableW(c.env, c.choices[SendMessageW(c.h, CB_GETCURSEL, 0, 0)].value);
+        if (wcscmp(c.env, PRESET_KEY)) SetEnvironmentVariableW(c.env, selected_value(c));
+    SetEnvironmentVariableW(L"F1CE_MODS_DIR", mods_dir().c_str());
     for (Check& c : g_checks) {
         if (c.env[0] == L'-') { if (checked(c)) cmd += L" " + std::wstring(c.env); continue; }
         SetEnvironmentVariableW(c.env, checked(c) ? c.value : nullptr);
@@ -476,6 +589,15 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (LOWORD(wp) == ID_START) start_game();
             else if (LOWORD(wp) == ID_BROWSE) browse();
             else if (LOWORD(wp) == ID_QUIT) DestroyWindow(h);
+            else if (HIWORD(wp) == CBN_SELCHANGE) {   // presets: picking one sets its options, changing one is Custom
+                Combo& preset = *find_combo(PRESET_KEY);
+                if ((HWND)lp == preset.h) {
+                    apply_preset(selection(preset));
+                } else if (is_preset_option((HWND)lp)) {
+                    SendMessageW(preset.h, CB_SETCURSEL, PRESET_CUSTOM, 0);
+                    save_custom();
+                }
+            }
             return 0;
         case WM_CTLCOLORSTATIC: {   // labels and check boxes on the tab's body: its background under the text
             // (these classes draw with their parent's clip region: without a rectangle the whole tab body would be
@@ -563,6 +685,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
             fs::copy(old, data, fs::copy_options::recursive, ec);
     }
     g_ini = g_exe_dir + L"\\f1ce_launcher.ini";
+    add_season_packs();
 
     NONCLIENTMETRICSW ncm{};
     ncm.cbSize = sizeof(ncm);

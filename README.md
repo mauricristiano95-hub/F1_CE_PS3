@@ -139,7 +139,7 @@ are kept on a Deck too.
 |-------------------|--------|
 | `--trace` | logs every HLE call and syscall |
 | `F1CE_DUMP_FRAMES=N` | saves every N-th frame as `frame_*.argb` (convert with `tools/frames_to_png.py`) |
-| `F1CE_INPUT="12:cross,16.5:down"` | scripted pad presses (seconds since start, 200 ms each) for automated tests |
+| `F1CE_INPUT="12:cross,16.5:down"` | scripted pad presses (seconds since start, 200 ms each) for automated tests; `f8` presses the F8 key |
 | `F1CE_DUMP_SURFACES=740000,10000` | saves those render targets every 300 frames |
 | `F1CE_DUMP_ON_PROG=<prog>` | saves the input/target surfaces around that program's first draw every 300 frames |
 | `F1CE_TRACE_FRAME=<n>` | logs every draw of frame n (program, target, state, textures) |
@@ -150,6 +150,8 @@ are kept on a Deck too.
 | `tools/race_test.sh <name> [VAR=value ...]` | Quick Race test in `dbg/<name>`, booted with `F1CE_SKIP_INTRO=1` (English); quits `QUIT_AFTER` (default 10) s after the race scene appears |
 | `F1CE_QUIT_AFTER_3D=<s>` | exits that many seconds after the first frame with 800+ draws (saves the last frame) |
 | `F1CE_QR_TRACK`, `F1CE_QR_DRIVER`, `F1CE_QR_DISTANCE`, `F1CE_QR_WEATHER`, `F1CE_QR_AI`, `F1CE_QR_FUEL`, `F1CE_QR_DAMAGE`, `F1CE_QR_FAILURES`, `F1CE_QR_PENALTIES` | Quick Race settings regardless of the menu (`runtime/hle_quickrace.cpp`; the launcher's "Quick Race Settings" tab): track folder name (`hungary`) or calendar index 0-17, driver id/surname/code (`heidfeld`, `HEI`; the team follows), distance 10/20/30/50/75/100, weather variable/sunny/cloudy/lightrain/heavyrain, AI easy/medium/hard, fuel and tyre wear off/scaled/realistic, damage/failures/penalties 0/1. Applied until the race's 3D scene, so `tools/race_test.sh` (cross only) reaches any combination; the menu keeps showing its own choices, and a setting changed in the menu (a value change within 2 s of a d-pad/stick move) is left to the menu from then on |
+| `F1CE_MOD_PACK=<name>`, `F1CE_MODS_DIR=<dir>` | mod pack (season pack): files of `<dir>/<name>/` (default dir `MODS` in the current folder; the launcher passes the `MODS` folder next to it) replace or add game files at run time, `.wad` entries included (`runtime/mods.cpp`; layout in the repo root's `MODDING_IDEAS.md`) |
+| `F1CE_AI_DRIVE=key` or `<s>`, F8 | the AI drives the player's car, as after a black flag (the game's own debug cheat `toggle_ai_control`; `runtime/hle_aidrive.cpp`, notes in `MODDING_IDEAS.md`). While the variable is set, F8 toggles AI control during a race, either way. `key`: F8 only; a number s: also hands the car over s seconds after the player first drives in each race (0 = at once) and logs `ai drive:` lines with the car's speed every 2 s. Launcher: Developer Tools, `F1CE_AI_DRIVE` (Off / F8 toggles AI driving / AI from the start). Scripted input can press it (`F1CE_INPUT="60:f8"`) |
 | `F1CE_LUA_PRINT=1`, `F1CE_LUA_LOG=1`, `F1CE_LUA_PATCH=<file>` | front-end Lua (`runtime/hle_frontend.cpp`): log the scripts' `print` output (a stub in the retail game), log every script load, run a Lua file instead of the built-in patch after each script the loader runs |
 | `F1CE_SKIP_INTRO=1`, `F1CE_LANGUAGE=<name>` | starts at the "Press Start" screen: no language menu, no Studio Liverpool / SCE logos, no intro movie (`runtime/hle_boot.cpp`; launcher: General tab). The language is `english` (default), `french`, `german`, `italian`, `spanish`, `portuguese` or `finnish`; without the skip it is only the one the language menu starts on |
 | `F1CE_QR_POKE=<offset>:<hex>` | experiment: writes a word into the Quick Race settings object until the race (+0x08 and +0x18 showed no effect in single runs, +0x10 = 4 crashes; an early "+0x08 changes the grid size" came from parallel runs taking another menu path) |
@@ -217,6 +219,12 @@ are kept on a Deck too.
 | `F1CE_CUBE_FACES=1..6` | reflection cube map faces rendered per frame, in turn (default 6, as on the RSX; saves renderer time only, not the SPU jobs) |
 | `F1CE_CUBE_HZ=<n>` | reflection cube map updates per second at most (default 30 with `F1CE_60FPS`, as the original game at 30 fps, else every frame; 0: every frame; `runtime/hle_cubemap.cpp`); `F1CE_CUBE_SKIP=1` never renders it (measurement only) |
 | `F1CE_SHADOW_RES=<k>` | shadow maps at k times their original 1024x2048 (0.5 = lighter on the GPU, 2 = sharper); default: they follow `F1CE_SCALE` like every render target |
+| `F1CE_CUBE_RES=<k>` | reflection cube map faces at k times their original 256x256 (launcher "Reflection resolution"; default: they follow `F1CE_SCALE`) |
+| `F1CE_CUBE_STATIC=1` | static reflections: the cube map is rendered during the first 2 s of a scene, then kept until the next one (`runtime/hle_cubemap.cpp`) |
+| `F1CE_TEX_RES=1/2` | texture resolution: the 1 or 2 largest mip levels of mipmapped textures are left out (half / quarter size; textures without mips, linear, main-memory and texel-addressed ones keep their size, short side at least 32 texels; `tex_levels_dropped` in `runtime/rsx_common.cpp`) |
+| `F1CE_CAR_LOD=<k>` | car detail distance: the game's car level-of-detail distances (15, 25, 50 m) times k (`runtime/hle_gfxopts.cpp`) |
+| `F1CE_MOTION_BLUR=0`, `F1CE_HEAT_HAZE=0` | no motion blur (the game's own Motion Blur.Enable read as off) / no heat haze behind the cars (the EngineHeat particle effect is never spawned); `runtime/hle_gfxopts.cpp` |
+| `F1CE_ZPASS_LOG=1` | logs a burst of 200 occlusion reports (offset, count) every 10 s |
 | `F1CE_SKIP_FN=<hex>,..` | measurement only: these render functions return at once (2f141c static shadows, 2f1bec blurred shadows, 43f620 shadow map, 43ffa0 shadow to alpha, 30388c cars); all of them log their calls per second (`skipfn:`, `runtime/hle_skipfn.cpp`) |
 | `F1CE_SPURS_SPUS=<n>` | SPU worker threads (default 5; 6 works, 7 and 8 hang at boot; 3 halves the grid fps) |
 | `F1CE_SPU_DMA_DIAG=1` | the per-DMA diagnostics of the SPURS workloads (off: they cost a shared atomic on every DMA) |
@@ -1339,3 +1347,30 @@ banks, then waits for SPU work.
     calling the update, but the update refreshes +0x160 itself (when the output's controller +0xc differs from the
     cached +0x14, the set becomes controller +0x58), so after a car change it still pointed at the previous car's freed
     or uninitialised set and camera 3 was read and written there. The set now comes from `out +0xc -> +0x58`.
+- **Launcher video options: motion blur, heat haze, car detail, texture and reflection resolution, static reflections
+  (2026-11-10, `runtime/hle_gfxopts.cpp`):**
+  - Motion blur: the Post Effects settings (`DefaultPostEffects.txt`, built in 0x4583A0) hold `Motion Blur.Enable` at
+    +0x418, read only through 0x447704 by foaTrackModel's render; the game itself clears it in some camera modes.
+    `F1CE_MOTION_BLUR=0` makes the getter return 0.
+  - Heat haze is the particle effect `Effects/EngineHeat.bpe`, index 2 of the effect manager's 28 pools (two per car,
+    slots 4 and 5 of 0x322714). `F1CE_HEAT_HAZE=0` makes the pool take 0x2F2CEC return no instance for it, a case the
+    game already handles (empty pool).
+  - Car detail: car models do not pick their detail level from occlusion counts (counts x0.001 and x1000 changed no draw
+    or vertex count). 0x3065F0 / 0x312900 compare the fov-scaled squared camera distance (car +14020) with 15 m (225 at
+    TOC 0x70E4A8) and the table 25, 50 m (0x1000E664). `F1CE_CAR_LOD=<k>` scales the three once. Grid vertices: x0.25
+    619k, original 653k, x4 744k.
+  - `F1CE_TEX_RES=1/2` leaves the largest mip levels out of mipmapped textures (both renderers start the image at that
+    guest level), `F1CE_CUBE_RES=<k>` scales the 256x256 cube faces as `F1CE_SHADOW_RES` does the shadow maps,
+    `F1CE_CUBE_STATIC=1` renders the cube only during a scene's first 2 s (grid draws 2968 -> 2526).
+  - Checked by scripted Silverstone races, Vulkan and OpenGL, everything on at once: no new warnings, image as expected
+    (softer textures at quarter size). Not yet checked by the user in play.
+- **Modding groundwork (2026-11-10):** asset archives decoded and a run-time override layer for mod packs.
+  - `.wad` (Wad class: ctor 0x4A8E4, open 0x4A4B8, LZ stream read 0x41208, name hash 0x1DA20): table of
+    `{CRC-32 hash, offset, size, stored}`, hash register starting at 0 over the lower-cased path, entries bit-packed
+    LZSS unless `stored == size`. `tools/wad.py` lists/extracts, `tools/wad_names.py` recovers paths from strings
+    (935 of 6297 in `tools/wad_names.txt`), `tools/gtf.py` converts GTF textures to/from DDS.
+  - `F1CE_MOD_PACK` (launcher: "Season pack (MODS folder)"): an archive the pack touches is served by `fs.cpp` as a
+    virtual file (rebuilt table, original bytes shifted behind it, pack files appended as raw entries), loose files are
+    redirected; no game code patched. Checked by a scripted run that replaced `Frontend/Textures/New_Border_Top.gtf`
+    (menu border shown red). Car textures are embedded in `Models/<Team>06/CarParts.sg`; findings and the plan are in
+    `MODDING_IDEAS.md`.

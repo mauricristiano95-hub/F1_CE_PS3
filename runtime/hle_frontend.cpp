@@ -32,7 +32,8 @@ constexpr u32 kLuaLoadBuffer = 0x5A3CF8, kLuaPcall = 0x58C1DC, kLuaToString = 0x
 const char kPatch[] = R"LUA(
 -- "QUIT GAME" in the bottom bar of the 2D front-end menus, between BACK and SELECT; reached with the pad by moving
 -- past the last (or before the first) item of a menu, chosen with SELECT: os.exit, which the runtime turns into the
--- same shutdown as closing the window. Not over a 3D scene (garage, race pause menus): os.getenv("F1CE_SCENE3D").
+-- same shutdown as closing the window. Not over a 3D scene (garage, race pause menus): os.getenv("F1CE_SCENE3D"),
+-- nor on the screens that hide the title bar (the 3D driver/team previews).
 -- This runs after every script the loader runs, each time with that script's globals table: xmove makes a real
 -- global, as NavigationBars.lua does. The game's own tables get no new fields (only wrapped methods); the button's
 -- state is F1CEQuit and the objects it keeps are in S.
@@ -113,17 +114,29 @@ local function report(err)
   print("F1CE: Quit Game error: " .. tostring(err))
 end
 
--- the screen's own onSelect may act on the current item before it calls Menu:userSelect: take SELECT first
--- (found on the call stack: the screen's onMenuUp/onMenuDown called Menu:moveSelection; returns the screen's env)
-local function hookScreen(level)
-  local ok, env = pcall(getfenv, level)
-  if not ok or type(env) ~= "table" or env == _G then
+-- the screen's own onSelect may act on the current item without calling Menu:userSelect (Quick Race and Grand Prix
+-- Weekend, PreRace.lua: START RACE): take SELECT first. The screen is found on the call stack (its onMenuUp/onMenuDown
+-- called Menu:moveSelection): the environment whose Menu is the menu moved, else the first one with an onSelect (a
+-- level further up can be another screen's: wrapping that one left SELECT to the screen); returns the screen's env
+local function findScreen(menu)
+  local first
+  for level = 1, 12 do
+    local ok, env = pcall(getfenv, level)
+    if ok and type(env) == "table" and env ~= _G and type(rawget(env, "onSelect")) == "function" then
+      if rawget(env, "Menu") == menu then
+        return env
+      end
+      first = first or env
+    end
+  end
+  return first
+end
+
+local function hookScreen(env)
+  if env == nil then
     return nil
   end
   local onSelect = rawget(env, "onSelect")
-  if type(onSelect) ~= "function" then
-    return nil
-  end
   if S.wrapped[env] ~= onSelect then
     local wrapped = function(state)
       if state == 1 and Q.focused and S.env == env and visible() then
@@ -189,12 +202,7 @@ local function quitMove(self, dir)
   S.dir = dir
   setArrows(self, false)
   sfx.play(sfx.move)
-  -- stack from getfenv: pcall, hookScreen, quitMove, pcall, the wrapper, the class's moveSelection, the screen
-  local level = 3
-  while S.env == nil and level <= 9 do
-    S.env = hookScreen(level)
-    level = level + 1
-  end
+  S.env = hookScreen(findScreen(self))
   return true
 end
 
@@ -307,7 +315,10 @@ local function patchNavigation(env)
   local onRender = nb.onRender
   nb.onRender = function(self)
     onRender(self)
-    if gNavBarOverride.mShowNavButtons and self.mButtons ~= nil and not S.broken and not os.getenv("F1CE_SCENE3D") then
+    -- (the 3D preview screens, driver and team select, trophies, unlocks, hide the title and draw too little for
+    -- F1CE_SCENE3D)
+    local o = gNavBarOverride
+    if o.mShowNavButtons and o.mShowTitle ~= false and self.mButtons ~= nil and not S.broken and not os.getenv("F1CE_SCENE3D") then
       local ok, err = pcall(drawQuit, self)
       if not ok then
         S.broken = true

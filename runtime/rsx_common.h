@@ -118,6 +118,12 @@ FORCE_INLINE u64 mix64(u64 x) {   // splitmix64 finalizer
 }
 u32 morton(u32 x, u32 y, u32 log_w, u32 log_h);
 u32 ilog2(u32 v);
+// Texture resolution (F1CE_TEX_RES=<n>): the n largest mip levels of a mipmapped texture are left out (1 = half,
+// 2 = quarter size). Textures without mips, linear, main-memory or texel-addressed ones (format bits 0x20/0x40) keep
+// their size, and the remaining level 0 keeps at least 32 texels on its short side.
+u32 tex_levels_dropped(u32 w, u32 h, u32 levels, u32 fmt, bool main_mem);
+u32 tex_level_bytes(u32 w, u32 h, u32 level, u32 base_fmt, u32 bpp);   // guest size of a swizzled or DXT mip level
+u32 zpass_value(u32 ea, u64 samples);   // the occlusion count written to report ea for that many counted samples
 float half_to_float(u16 h);
 
 // Block heaps: raw vertex data (vertex pulling) and converted index lists that stay for several frames. Blocks are

@@ -58,10 +58,12 @@ set(RUNTIME_SOURCES
   runtime/loader.cpp
   runtime/lv2.cpp
   runtime/fs.cpp
+  runtime/mods.cpp
   runtime/hle_sys.cpp
   runtime/hle_misc.cpp
   runtime/hle_aspect.cpp
   runtime/hle_cubemap.cpp
+  runtime/hle_gfxopts.cpp
   runtime/hle_skipfn.cpp
   runtime/hle_joblist.cpp
   runtime/hle_quickrace.cpp
@@ -69,6 +71,7 @@ set(RUNTIME_SOURCES
   runtime/hle_frontend.cpp
   runtime/hle_physics.cpp
   runtime/hle_rumble.cpp
+  runtime/hle_aidrive.cpp
   runtime/hle_camera.cpp
   runtime/hle_gcm.cpp
   runtime/hle_spurs.cpp

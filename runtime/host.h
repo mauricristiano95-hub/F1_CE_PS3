@@ -11,9 +11,10 @@ struct PadState {
 
 void init();
 PadState pad_state();
-// debug / tuning keys held right now (numpad: hle_camera.cpp's TV camera tuning), DK_* bits
+// debug / tuning keys held right now (numpad: hle_camera.cpp's TV camera tuning; F8: hle_aidrive.cpp), DK_* bits
 enum DebugKey : u32 { DK_UP = 1, DK_DOWN = 2, DK_LEFT = 4, DK_RIGHT = 8, DK_BACK = 16, DK_FWD = 32, DK_PITCH_UP = 64,
-                      DK_PITCH_DOWN = 128, DK_FOV_UP = 256, DK_FOV_DOWN = 512, DK_RESET = 1024, DK_PRINT = 2048 };
+                      DK_PITCH_DOWN = 128, DK_FOV_UP = 256, DK_FOV_DOWN = 512, DK_RESET = 1024, DK_PRINT = 2048,
+                      DK_AI_TOGGLE = 4096 };
 u32 debug_keys();
 void pad_rumble(float low, float high);   // motor strengths 0..1 (low = heavy motor), held until the next call
 void input_clock_reset();   // scripted input times count from this call (end of the start-up shader phase)
