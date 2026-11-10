@@ -32,6 +32,7 @@ HOOKS = {0x3FB310: "camera_projection_hook",   # camera projection and frustum, 
          0x11C150: "tyre_forces_hook", 0x117ED0: "wheel_update_hook",
          0x17B200: "car_tick_hook",   # hle_physics.cpp
          0x3574C0: "controller_update_hook",   # hle_rumble.cpp
+         0x36F0E8: "playercam_update_hook", 0x36F79C: "playercam_setcam_hook",   # hle_camera.cpp
          0x5C8260: "audio_src_hook",   # hle_misc.cpp: 3D update of a sound source (distance, pan, Doppler)
          0x4C6280: "engine_snd_hook",   # hle_misc.cpp: a car's engine sound (grain engine inputs and update)
          0x5A9120: "lua_os_exit_hook", 0x5A566C: "lua_print_hook",

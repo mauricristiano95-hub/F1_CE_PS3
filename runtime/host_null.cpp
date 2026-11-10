@@ -5,6 +5,7 @@
 namespace host {
 void init() { LOG_I("host: headless backend"); }
 PadState pad_state() { return {}; }
+u32 debug_keys() { return 0; }
 void pad_rumble(float, float) {}
 void input_clock_reset() {}
 bool quit_requested() { return false; }

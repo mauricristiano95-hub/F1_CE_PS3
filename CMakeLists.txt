@@ -69,6 +69,7 @@ set(RUNTIME_SOURCES
   runtime/hle_frontend.cpp
   runtime/hle_physics.cpp
   runtime/hle_rumble.cpp
+  runtime/hle_camera.cpp
   runtime/hle_gcm.cpp
   runtime/hle_spurs.cpp
   runtime/hle_savedata.cpp

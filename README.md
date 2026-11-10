@@ -89,7 +89,7 @@ The console shows warnings and errors only; the log file has everything (`F1CE_L
 which slows the game noticeably in Git Bash / the Windows console).
 
 Keyboard: arrows = d-pad, **Z** = ✕, **X** = ◯, **A** = □, **S** = △, **Q/W** = L1/R1, **1/2** = L2/R2,
-**Enter** = Start, **Backspace** = Select. Gamepads are supported through SDL.
+**Enter** = Start, **Backspace** = Select, **I/J/K/L** = right stick (turns the external cameras). Gamepads are supported through SDL.
 
 ## Linux and Steam Deck
 
@@ -201,6 +201,9 @@ are kept on a Deck too.
 | `F1CE_WPOS_CLIP_W_FP=<fp hash>,..` | WPOS.w = clip w for those programs only (`-<hash>,..`: all but those) |
 | `F1CE_FULLSCREEN=1`, F11 / Alt+Enter | start in full screen / toggle it at any time |
 | `F1CE_RUMBLE=<0..200>` | gamepad vibration strength in percent (default 100, 0 off; launcher: "Controller vibration"). Disc version 01.00 has no pad vibration; this is the DualShock 3 vibration of update 02.00 (0x3591e8 there) ported to 01.00's controller update 0x3574c0: impacts, kerbs, slipping wheels, run-off, low grip and engine stall/start, see `runtime/hle_rumble.cpp`. `F1CE_RUMBLE_LOG=1` logs its inputs 10 times a second |
+| `F1CE_TVCAM=0/1` | onboard TV camera (default on; launcher: "Onboard TV camera"): the second TV pod camera of the view cycle (camera id 3, the game's "TV pod offset") becomes a broadcast-style T-cam, placed relative to the car's own TV pod camera (id 2) by `F1CE_TVCAM_UP`, `F1CE_TVCAM_BACK`, `F1CE_TVCAM_SIDE` (metres, defaults 0.10 / 0.05 / 0), tilted down `F1CE_TVCAM_PITCH` degrees (20) with a vertical field of view of `F1CE_TVCAM_FOV` degrees (68); matched on the Honda against a 2005 BAR Honda onboard shot (`runtime/hle_camera.cpp`). `F1CE_TVCAM=tune` or `F1CE_TVCAM_TUNE=1` (launcher: "numpad tunes it"): the numpad moves the camera live while driving in that view: 8/2 up/down, 4/6 left/right, 9/3 back/forward, 7/1 tilt up/down, +/- field of view, 0 back to the defaults, 5 prints the values; each change is printed on the console (with the equivalent variables) and saved to `tvcam_tune.ini` in the working directory (`F1CE_TVCAM_FILE`), which is loaded on every start and overrides the variables: delete it to return to them |
+| `F1CE_CAM_ORBIT=0/1` | the external (chase) cameras turn around the car with the right stick (default on; launcher: "Chase camera look-around"): left/right up to 180°, up/down raises or lowers the view; springs back when released. `F1CE_CAM_ORBIT_TEST=<yaw>,<pitch>` holds a fixed orbit (degrees) for frame tests |
+| `F1CE_CAM_LOG=1`, `F1CE_CAMERA=<id>` | logs the player camera state once a second (camera list, record, world and view matrices, car matrix), forces a camera id (0 external, 1 far, 2 TV pod, 3 onboard TV, 4 cockpit, 5 nose) |
 | `F1CE_WINDOW=<w>x<h>`, `F1CE_STRETCH=1` | initial window size / fill the window instead of keeping the internal image's aspect ratio (black bars) |
 | `F1CE_COMPILE_THREADS=<n>`, `F1CE_NATIVE_GLSL=1` | shader compile threads (default 1) / the scale-1 shader sources of before |
 | `F1CE_NO_PRECOMPILE=1` | skips the start-up shader phase (the program database is still recorded) |
@@ -1314,3 +1317,25 @@ banks, then waits for SPU work.
     1-3 of r10 differ). `F1CE_SPU_CULL_CHECK=1/2`: 12k searches compared, 0 differ (also with NaN/infinity input).
     Workload 3: 3.8% -> 0.7% of all SPU samples; 6-CPU heavy rain, 4 pairs: 1% low 23.8 -> 24.1, p99 47.6 -> 46.9 ms,
     4.41 -> 4.32 cores (better in every pair, small). `F1CE_SPU_NOFASTSEARCH=1` = translated.
+- **In-game cameras (2026-11-09, `runtime/hle_camera.cpp`):** the player camera is a PlayerCam object (vtable 0x100475f0,
+  constructor 0x36fa28, per-frame update 0x36f0e8 hooked). It follows the car of its controller (+0x14 -> car +0x24) and
+  cycles through a list of camera ids (0 external, 1 far, 2 TV pod, 3 TV pod offset, 4 cockpit, 5 nose; 0xb-0xd split
+  screen), the ids the Lua Camera Options menu knows as `cameranose` .. `cameraexternalfar` (game object +0x6fb4..). Every
+  car has a camera set (controller +0x58): a 0x40-byte record per id with the position and look-at point in car space,
+  half the vertical fov in radians, near plane and a chase/fixed flag (+0x3c); the update writes the camera's world
+  matrix to its output +0x80 and the view matrix to +0xc0. Findings: the fov stored (0.619 for the TV pod) is the half
+  angle (the frame's horizon confirms ~71 degrees vertical), the game's TV pod camera already sits on the roll hoop.
+  - Onboard TV camera: camera 3 (the user wanted the second TV pod view replaced, the central one kept) is rewritten
+    from camera 2's position with `F1CE_TVCAM_*` offsets (defaults up 0.10, back 0.05, tilt 20 degrees, fov 68) matched
+    on the Honda against a 2005 BAR Honda onboard shot in four scripted iterations (`dbg/cam2`..`cam6`): a narrow
+    lens (50 degrees) made the front wheels far too large, a camera 0.45 m back looked through the airbox. Live tuning
+    on the numpad (`F1CE_TVCAM=tune`), values saved to `tvcam_tune.ini`.
+  - Chase cameras turn with the right stick (`F1CE_CAM_ORBIT`): the output matrix is rotated about the car position
+    (yaw about the world up, pitch about the camera's right axis, limited -15..70 degrees) and the view matrix rebuilt;
+    smoothed over ~0.25 s so it springs back. Verified with `F1CE_CAM_ORBIT_TEST=90,20` (`dbg/cam4`). Keyboard I/J/K/L
+    act as the right stick.
+  - Crash fix (2026-11-10): Time Trial (guest memory fault on its first camera update, read at 0xb6f166d8) and
+    leaving a Quick Race crashed with the TV camera on. The hook took the camera set from PlayerCam +0x160 before
+    calling the update, but the update refreshes +0x160 itself (when the output's controller +0xc differs from the
+    cached +0x14, the set becomes controller +0x58), so after a car change it still pointed at the previous car's freed
+    or uninitialised set and camera 3 was read and written there. The set now comes from `out +0xc -> +0x58`.

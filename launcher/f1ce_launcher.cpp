@@ -9,6 +9,7 @@
 #include <shlobj.h>
 
 #include <algorithm>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -77,6 +78,12 @@ Combo g_combos[] = {
     // gamepad motors: update 02.00's DualShock 3 vibration ported to this version (runtime/hle_rumble.cpp)
     {L"Controller vibration", L"F1CE_RUMBLE",
      {{L"Off", L"0"}, {L"Light", L"50"}, {L"Normal", nullptr}, {L"Strong", L"150"}}, 2, GAME},
+    // in-game cameras (runtime/hle_camera.cpp): the second TV pod camera of the view cycle as a broadcast T-cam, and
+    // the right stick turning the chase cameras
+    {L"Onboard TV camera (2nd TV pod view)", L"F1CE_TVCAM",
+     {{L"On", nullptr}, {L"On, numpad tunes it (values on the console, saved in tvcam_tune.ini)", L"tune"},
+      {L"Off (original TV pod offset camera)", L"0"}}, 0, GAME},
+    {L"Chase camera look-around (right stick)", L"F1CE_CAM_ORBIT", {{L"On", nullptr}, {L"Off", L"0"}}, 0, GAME},
     // the game's language when its menu is skipped (F1CE_SKIP_INTRO); otherwise the one the menu starts on
     // (runtime/hle_boot.cpp)
     {L"Language", L"F1CE_LANGUAGE",
@@ -225,7 +232,7 @@ bool checked(const Check& c) { return SendMessageW(c.h, BM_GETCHECK, 0, 0) == BS
 
 void load_settings() {
     wchar_t b[MAX_PATH * 2];
-    std::wstring def = full_path(g_run_dir + L"\\..\\F1_CE_PS3_og\\PS3_GAME");
+    std::wstring def = full_path(parent(g_exe_dir) + L"\\..\\F1_CE_PS3_og\\PS3_GAME");
     GetPrivateProfileStringW(L"game", L"path", def.c_str(), b, MAX_PATH * 2, g_ini.c_str());
     SetWindowTextW(g_path, b);
     for (Combo& c : g_combos) {
@@ -546,7 +553,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     wchar_t b[MAX_PATH * 2];
     GetModuleFileNameW(nullptr, b, MAX_PATH * 2);
     g_exe_dir = parent(b);
-    g_run_dir = parent(g_exe_dir);
+    // the game runs in the launcher's folder: its log, tvcam_tune.ini and ps3_data (saves) stay next to the exes
+    g_run_dir = g_exe_dir;
+    {   // older versions ran it in the parent folder: copy the saves from there once (the old folder is left alone)
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        const fs::path data = fs::path(g_run_dir) / L"ps3_data", old = fs::path(parent(g_exe_dir)) / L"ps3_data";
+        if (!fs::exists(data, ec) && fs::is_directory(old / L"dev_hdd0" / L"home", ec))
+            fs::copy(old, data, fs::copy_options::recursive, ec);
+    }
     g_ini = g_exe_dir + L"\\f1ce_launcher.ini";
 
     NONCLIENTMETRICSW ncm{};

@@ -17,6 +17,7 @@ namespace {
 std::mutex g_pad_mutex;
 PadState g_pad;
 std::atomic<u32> g_rumble{0};   // low << 16 | high, 0..0xFFFF each (pad_rumble), applied on the UI thread
+std::atomic<u32> g_debug_keys{0};   // DK_* bits (debug_keys), sampled with the pad
 std::atomic<bool> g_quit{false};
 
 std::mutex g_win_mutex;
@@ -77,6 +78,25 @@ void update_pad(SDL_Gamepad* gp) {
         p.pressure[10] = (u16)std::clamp(lt >> 7, 0, 255);   // L2 / R2 pressure
         p.pressure[11] = (u16)std::clamp(rt >> 7, 0, 255);
     }
+    // I/J/K/L = right stick (the external cameras turn with it, hle_camera.cpp)
+    if (k[SDL_SCANCODE_J] != k[SDL_SCANCODE_L]) p.rx = k[SDL_SCANCODE_J] ? 0 : 0xff;
+    if (k[SDL_SCANCODE_I] != k[SDL_SCANCODE_K]) p.ry = k[SDL_SCANCODE_I] ? 0 : 0xff;
+    // numpad = tuning keys (F1CE_TVCAM_TUNE, hle_camera.cpp): 8/2 up/down, 4/6 left/right, 9/3 back/forward,
+    // 7/1 tilt up/down, +/- field of view, 0 reset, 5 print
+    u32 dk = 0;
+    if (k[SDL_SCANCODE_KP_8]) dk |= DK_UP;
+    if (k[SDL_SCANCODE_KP_2]) dk |= DK_DOWN;
+    if (k[SDL_SCANCODE_KP_4]) dk |= DK_LEFT;
+    if (k[SDL_SCANCODE_KP_6]) dk |= DK_RIGHT;
+    if (k[SDL_SCANCODE_KP_9]) dk |= DK_BACK;
+    if (k[SDL_SCANCODE_KP_3]) dk |= DK_FWD;
+    if (k[SDL_SCANCODE_KP_7]) dk |= DK_PITCH_UP;
+    if (k[SDL_SCANCODE_KP_1]) dk |= DK_PITCH_DOWN;
+    if (k[SDL_SCANCODE_KP_PLUS]) dk |= DK_FOV_UP;
+    if (k[SDL_SCANCODE_KP_MINUS]) dk |= DK_FOV_DOWN;
+    if (k[SDL_SCANCODE_KP_0]) dk |= DK_RESET;
+    if (k[SDL_SCANCODE_KP_5]) dk |= DK_PRINT;
+    g_debug_keys = dk;
     // digital buttons report full pressure when pressed
     static const struct { int word; u16 bit; int idx; } press[] = {
         {1, D1_RIGHT, 0}, {1, D1_LEFT, 1}, {1, D1_UP, 2}, {1, D1_DOWN, 3}, {2, D2_TRIANGLE, 4}, {2, D2_CIRCLE, 5},
@@ -197,6 +217,8 @@ std::vector<ScriptedPress> parse_script() {
     return v;
 }
 }  // namespace
+
+u32 debug_keys() { return g_debug_keys; }
 
 void pad_rumble(float low, float high) {
     auto q = [](float v) { return (u32)std::lround(std::clamp(v, 0.0f, 1.0f) * 65535.0f); };
