@@ -7,6 +7,7 @@
 #include <commctrl.h>
 #include <uxtheme.h>
 #include <shlobj.h>
+#include <dxgi1_6.h>
 
 #include <algorithm>
 #include <filesystem>
@@ -55,6 +56,8 @@ struct Field {   // free text; empty leaves the variable unset
 
 Combo g_combos[] = {
     {L"Renderer", L"F1CE_RENDERER", {{L"OpenGL", nullptr}, {L"Vulkan", L"vulkan"}}, 0, VIDEO},
+    // the GPUs found at start (add_gpus)
+    {L"GPU", L"F1CE_GPU", {{L"Automatic (high performance)", nullptr}}, 0, VIDEO},
     {L"Internal resolution", L"F1CE_SCALE",
      {{L"720x480 (4:3, PS3 480p)", L"480p:4x3"}, {L"720x480 (16:9, PS3 480p)", L"480p"},
       {L"720x576 (4:3, PS3 576p)", L"576p:4x3"}, {L"720x576 (16:9, PS3 576p)", L"576p"}, {L"904x565 (16:10)", L"904x565"},
@@ -62,7 +65,8 @@ Combo g_combos[] = {
       {L"1920x1080 (16:9)", L"1.5"}, {L"2560x1080 (21:9)", L"2560x1080"}, {L"2560x1440 (16:9)", L"2"},
       {L"3440x1440 (21:9)", L"3440x1440"}, {L"3840x2160 (16:9)", L"3"}, {L"5120x2880 (16:9)", L"4"}}, 5, VIDEO},
     {L"Window size", L"F1CE_WINDOW",
-     {{L"1280x720", nullptr}, {L"1600x900", L"1600x900"}, {L"1920x1080", L"1920x1080"}, {L"2560x1440", L"2560x1440"}}, 0, VIDEO},
+     {{L"1280x720", nullptr}, {L"1600x900", L"1600x900"}, {L"1920x1080", L"1920x1080"}, {L"2560x1080 (21:9)", L"2560x1080"},
+      {L"2560x1440", L"2560x1440"}, {L"3440x1440 (21:9)", L"3440x1440"}, {L"3840x2160", L"3840x2160"}}, 0, VIDEO},
     {L"Vertical sync", L"F1CE_VSYNC", {{L"On", nullptr}, {L"Off", L"0"}, {L"Adaptive", L"-1"}}, 0, VIDEO},
     // launcher only (not passed to the game): sets the options of PRESET_ENVS (g_presets); "Custom" keeps the
     // player's own values, saved in the ini's [custom preset] section
@@ -292,6 +296,79 @@ Combo* find_combo(const wchar_t* env) {
 }
 int selection(const Combo& c) { return (int)SendMessageW(c.h, CB_GETCURSEL, 0, 0); }
 const wchar_t* selected_value(const Combo& c) { return c.choices[selection(c)].value; }
+
+// one choice per GPU (DXGI adapter, software ones left out); the value is its PCI ids "vvvv:dddd" (hex), which the
+// Vulkan renderer looks for (runtime/rsx_vk.cpp). OpenGL takes the GPU from Windows' graphics preference of f1ce.exe
+// (set_gpu_preference), which names only the power-saving or the high-performance GPU: any other is Vulkan only.
+struct Gpu { std::wstring label, value; int pref; };   // pref: Windows' GpuPreference, 1 power saving, 2 high performance
+std::vector<Gpu> g_gpus;   // (the choices point into it)
+void add_gpus() {
+    IDXGIFactory6* f = nullptr;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory6), (void**)&f))) return;   // (before Windows 10 1803)
+    auto desc = [](IDXGIAdapter1* a) {
+        DXGI_ADAPTER_DESC1 d{};
+        a->GetDesc1(&d);
+        a->Release();
+        return d;
+    };
+    auto first = [&](DXGI_GPU_PREFERENCE p) {
+        IDXGIAdapter1* a = nullptr;
+        return SUCCEEDED(f->EnumAdapterByGpuPreference(0, p, __uuidof(IDXGIAdapter1), (void**)&a)) ? desc(a).AdapterLuid : LUID{};
+    };
+    const LUID fast = first(DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE), low = first(DXGI_GPU_PREFERENCE_MINIMUM_POWER);
+    auto same = [](LUID a, LUID b) { return a.LowPart == b.LowPart && a.HighPart == b.HighPart; };
+    IDXGIAdapter1* a = nullptr;
+    for (UINT i = 0; f->EnumAdapters1(i, &a) != DXGI_ERROR_NOT_FOUND; i++) {
+        const DXGI_ADAPTER_DESC1 d = desc(a);
+        if (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
+        wchar_t v[16];
+        swprintf(v, 16, L"%04x:%04x", d.VendorId, d.DeviceId);
+        if (std::any_of(g_gpus.begin(), g_gpus.end(), [&](const Gpu& g) { return g.value == v; })) continue;
+        g_gpus.push_back({d.Description, v, same(d.AdapterLuid, fast) ? 2 : same(d.AdapterLuid, low) ? 1 : 0});
+    }
+    f->Release();
+    if (g_gpus.size() > 1)
+        for (Gpu& g : g_gpus) g.label += g.pref == 2 ? L" (high performance)" : g.pref == 1 ? L" (power saving)" : L" (Vulkan only)";
+    for (const Gpu& g : g_gpus) find_combo(L"F1CE_GPU")->choices.push_back({g.label.c_str(), g.value.c_str()});
+}
+
+// Windows' per-application graphics preference (Settings > System > Display > Graphics): "GpuPreference=n;" in the
+// value named after f1ce.exe under HKCU\Software\Microsoft\DirectX\UserGpuPreferences, the GPU OpenGL runs on.
+// Automatic asks for the high-performance GPU but keeps a preference the player set there themselves; the one the
+// launcher wrote last is remembered in the ini to tell them apart.
+void set_gpu_preference(const std::wstring& exe) {
+    const wchar_t* v = selected_value(*find_combo(L"F1CE_GPU"));
+    int want = 2;
+    for (const Gpu& g : g_gpus)
+        if (v && g.value == v) want = g.pref;
+    if (!want) return;
+    HKEY k;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\DirectX\\UserGpuPreferences", 0, nullptr, 0,
+                        KEY_QUERY_VALUE | KEY_SET_VALUE, nullptr, &k, nullptr))
+        return;
+    wchar_t b[512] = {};
+    DWORD size = sizeof(b) - sizeof(wchar_t), type = 0;
+    std::wstring cur;
+    if (!RegQueryValueExW(k, exe.c_str(), nullptr, &type, (BYTE*)b, &size) && type == REG_SZ) cur = b;
+    const size_t at = cur.find(L"GpuPreference=");
+    const int have = at == std::wstring::npos ? 0 : _wtoi(cur.c_str() + at + 14);
+    if (!v && have && have != GetPrivateProfileIntW(L"game", L"gpu_preference", 0, g_ini.c_str())) {
+        RegCloseKey(k);
+        return;
+    }
+    if (have != want) {   // (the value's other entries are kept)
+        const std::wstring entry = L"GpuPreference=" + std::to_wstring(want) + L";";
+        if (at == std::wstring::npos) {
+            cur += entry;
+        } else {
+            const size_t end = cur.find(L';', at);
+            cur.replace(at, end == std::wstring::npos ? std::wstring::npos : end + 1 - at, entry);
+        }
+        RegSetValueExW(k, exe.c_str(), 0, REG_SZ, (const BYTE*)cur.c_str(), DWORD((cur.size() + 1) * sizeof(wchar_t)));
+    }
+    RegCloseKey(k);
+    WritePrivateProfileStringW(L"game", L"gpu_preference", std::to_wstring(want).c_str(), g_ini.c_str());
+}
 // selects the choice with this value (nullptr: the unset one); unknown values leave the selection alone
 void select_value(Combo& c, const wchar_t* v) {
     for (size_t i = 0; i < c.choices.size(); i++)
@@ -395,6 +472,7 @@ void start_game() {
         return;
     }
     save_settings();
+    set_gpu_preference(exe);
     std::wstring cmd = L"\"" + exe + L"\" \"" + game + L"\"";
     // the variable is cleared when unset here: some options act as soon as it exists, whatever its value
     for (Combo& c : g_combos)
@@ -686,6 +764,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     }
     g_ini = g_exe_dir + L"\\f1ce_launcher.ini";
     add_season_packs();
+    add_gpus();
 
     NONCLIENTMETRICSW ncm{};
     ncm.cbSize = sizeof(ncm);

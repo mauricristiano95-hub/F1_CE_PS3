@@ -213,6 +213,7 @@ are kept on a Deck too.
 | `F1CE_SCALE=1..4`, `<w>x<h>`, `480p`, `576p` | internal resolution (x 1280x720; 1.5 = 1920x1080, 3 = 3840x2160): fractions allowed, supersampled to the window. `<w>x<h>` (640x360 to 5120x2880), at another aspect ratio: the 3D scene takes that ratio and a wider field of view, its interface stays 16:9 in the middle, menus are 16:9 between black bars (`runtime/hle_aspect.cpp`). `480p`, `576p` (`:4x3` for 4:3): the PS3's own video modes, with the game's layouts for them |
 | `F1CE_MSAA=2/4/8` | samples of the targets the game antialiases (default 4, as on the RSX) |
 | `F1CE_FXAA=1` | FXAA on the final image |
+| `F1CE_GPU=<vvvv:dddd>` | the GPU, by PCI vendor:device ids (hex, e.g. `10de:28e1`; Vulkan logs every GPU as `rsx: GPU ...`): Vulkan picks it, else a discrete GPU. OpenGL cannot pick one: the launcher's GPU choice sets Windows' graphics preference of `f1ce.exe` (`GpuPreference` under `HKCU\Software\Microsoft\DirectX\UserGpuPreferences`, the Settings > Display > Graphics entry; Automatic = high performance unless the player set one there), which names only the power-saving or the high-performance GPU; a mismatch is logged |
 | `F1CE_VSYNC=1/0/-1` | wait for the display's vblank (default) / off / adaptive: late frames tear instead of waiting |
 | `F1CE_60FPS=1` | up to 60 fps with the game speed unchanged (ticks per frame follow the frame time); a stopped car in a race stays at 30 fps (`F1CE_60FPS_NOHOLD=1` turns that off) |
 | `F1CE_RAIN_SMOOTH=0` | the rain drops on the screen as the game's water map gives them (default: read through a 3x3 tent filter, see the 2026-11-03 rain entry) |
@@ -1374,3 +1375,11 @@ banks, then waits for SPU work.
     redirected; no game code patched. Checked by a scripted run that replaced `Frontend/Textures/New_Border_Top.gtf`
     (menu border shown red). Car textures are embedded in `Models/<Team>06/CarParts.sg`; findings and the plan are in
     `MODDING_IDEAS.md`.
+- **Wide format flicker fix (2026-11-11):** with a 21:9 internal resolution, the picture switched between 21:9 and 16:9
+  between bars (stretching, black bars coming and going) in career driver tests, worse in rain. `wide_frame()` was
+  "this frame has >= 800 draws", and a lone car on track crosses that line. Now (`runtime/hle_aspect.cpp`
+  `note_frame_scene`) a scene starts with the first frame that builds a 16:9 picture camera (0x3FB310; every race frame
+  builds two, menus and loading screens none and at most ~50 draws) or makes 800 draws, and ends after 15 frames with
+  neither; transitions are logged as `aspect: entering/leaving the wide format`. The launcher's window sizes gained
+  2560x1080, 3440x1440 and 3840x2160. Checked by a scripted Silverstone race at 3440x1440 (one transition, picture and
+  centred HUD right); the driver tests themselves not yet replayed.

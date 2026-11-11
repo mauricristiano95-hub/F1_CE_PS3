@@ -2485,6 +2485,17 @@ static void gl_init_once() {
     glGenTextures(1, &g_present_tex);
     gl_ok = true;
     LOG_I("rsx: OpenGL renderer ready (%s)", (const char*)glGetString(GL_RENDERER));
+    // OpenGL cannot pick a GPU itself: the launcher sets Windows' graphics preference of f1ce.exe for F1CE_GPU. Its
+    // vendor checked against GL_VENDOR, so a log tells when that preference was not followed
+    if (const char* want = getenv("F1CE_GPU")) {
+        const unsigned vendor = (unsigned)strtoul(want, nullptr, 16);
+        const char* name = vendor == 0x10de ? "NVIDIA" : vendor == 0x1002 ? "AMD" : vendor == 0x8086 ? "Intel" : nullptr;
+        std::string gl_vendor = (const char*)glGetString(GL_VENDOR);
+        if (vendor == 0x1002 && gl_vendor.find("ATI") != std::string::npos) gl_vendor = "AMD";
+        if (name && gl_vendor.find(name) == std::string::npos)
+            LOG_W("rsx: F1CE_GPU=%s asks for an %s GPU but OpenGL runs on %s (%s); Vulkan can pick any GPU", want, name,
+                  (const char*)glGetString(GL_RENDERER), gl_vendor.c_str());
+    }
 }
 
 // 2D objects as bound by libgcm: subchannel 1 = NV0039 (memory to memory), 3 = NV3062 (2D surface),
@@ -2885,6 +2896,7 @@ void flip(u32 ea, u32 pitch, u32 width, u32 height) {
         static u64 last_draws = 0, start_us = 0;
         u64 frame_draws = g_draws - last_draws;
         g_last_frame_draws = frame_draws;
+        note_frame_scene(frame_draws);
         last_draws = g_draws;
         if (quit_after >= 0) {
             if (!start_us && frame_draws >= 800) {

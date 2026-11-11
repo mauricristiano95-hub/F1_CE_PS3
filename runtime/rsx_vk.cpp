@@ -2155,15 +2155,24 @@ void create_device() {
     vkEnumeratePhysicalDevices(g_inst, &n, nullptr);
     std::vector<VkPhysicalDevice> devs(n);
     vkEnumeratePhysicalDevices(g_inst, &n, devs.data());
+    // F1CE_GPU=vvvv:dddd (PCI vendor:device, hex; the launcher's GPU choice) first, then a discrete GPU with Vulkan 1.3,
+    // else the first with it
+    unsigned want_vendor = 0, want_device = 0;
+    const char* want = getenv("F1CE_GPU");
+    if (want && sscanf(want, "%x:%x", &want_vendor, &want_device) != 2) want_vendor = want_device = 0;
     int best = -1;
-    for (VkPhysicalDevice d : devs) {   // a discrete GPU with Vulkan 1.3, else the first with it
+    for (VkPhysicalDevice d : devs) {
         VkPhysicalDeviceProperties pr;
         vkGetPhysicalDeviceProperties(d, &pr);
+        LOG_I("rsx: GPU %04x:%04x %s, Vulkan %u.%u", pr.vendorID, pr.deviceID, pr.deviceName,
+              VK_API_VERSION_MAJOR(pr.apiVersion), VK_API_VERSION_MINOR(pr.apiVersion));
         if (pr.apiVersion < VK_API_VERSION_1_3) continue;
         int score = pr.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 2 : 1;
+        if (want_vendor && pr.vendorID == want_vendor && pr.deviceID == want_device) score = 3;
         if (score > best) { best = score; g_phys = d; g_props = pr; }
     }
     if (!g_phys) fatal("no GPU with Vulkan 1.3");
+    if (want_vendor && best != 3) LOG_W("rsx: F1CE_GPU=%s: no such GPU with Vulkan 1.3, using %s", want, g_props.deviceName);
     vkGetPhysicalDeviceMemoryProperties(g_phys, &g_memprops);
     vkGetPhysicalDeviceQueueFamilyProperties(g_phys, &n, nullptr);
     std::vector<VkQueueFamilyProperties> qf(n);
@@ -2678,6 +2687,7 @@ void flip(u32 ea, u32 pitch, u32 width, u32 height) {
         static u64 last_draws = 0, scene_us = 0;
         u64 frame_draws = g_draws - last_draws;
         g_last_frame_draws = frame_draws;
+        note_frame_scene(frame_draws);
         last_draws = g_draws;
         if (quit_after >= 0) {
             if (!scene_us && frame_draws >= 800) {

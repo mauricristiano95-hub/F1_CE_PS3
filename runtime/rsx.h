@@ -12,6 +12,7 @@ float target_scale_x(u32 w, u32 h);    // of a local render target of that guest
 float target_scale_y(u32 w, u32 h);
 void video_mode(u8* id, u8* aspect);   // what cellVideoOutGetState reports
 bool wide_frame();                     // this frame shows the 3D scene at the format's own aspect ratio
+void note_frame_scene(u64 draws);      // at the end of each frame: updates wide_frame()
 double present_aspect(u32 w, u32 h);   // of the image of a w x h guest surface on screen
 void note_display(u32 offset);         // a flipped buffer
 bool hud_draw(u32 offset, bool blend, bool depth_test);          // interface draw, kept 16:9

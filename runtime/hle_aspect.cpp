@@ -3,6 +3,7 @@
 // in a 3D scene the cameras take the format's aspect ratio (below) and the interface stays 16:9 in the middle of the
 // image; everything else (menus, loading screens) is the 16:9 picture between black bars.
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstdio>
@@ -62,8 +63,24 @@ void video_mode(u8* id, u8* aspect) {
     *id = format().lines == 1 ? 4 : format().lines == 2 ? 5 : 2;
     *aspect = format().narrow ? 1 : 2;
 }
-// a 3D scene: at most a few hundred draws in the 2D screens, 1400 and up on track (the same test as car_standing)
-bool wide_frame() { return res_scale_x() != res_scale_y() && g_last_frame_draws >= 800; }
+// A 3D scene builds its picture camera (16:9) every frame; the 2D screens build none and make at most ~50 draws. The draw
+// count alone (>= 800) flickered: a lone car on track in the rain, as in the career driver tests, crosses it all the time,
+// and each crossing switched the picture between the wide format and 16:9 between bars. So the scene starts with the
+// first frame that builds a picture camera or makes 800 draws, and ends only after half a second of frames with neither.
+std::atomic<u32> g_cameras{0};   // picture cameras built since the last frame end
+std::atomic<bool> g_wide{false};
+bool wide_frame() { return g_wide.load(std::memory_order_relaxed); }
+void note_frame_scene(u64 draws) {
+    static int quiet = 0;
+    if (res_scale_x() == res_scale_y()) return;
+    const bool scene = g_cameras.exchange(0) > 0 || draws >= 800;
+    quiet = scene ? 0 : quiet + 1;
+    if (scene != g_wide.load(std::memory_order_relaxed) && (scene || quiet >= 15)) {
+        static int logged = 0;
+        if (logged++ < 200) LOG_I("aspect: %s the wide format at %.2f s (%u draws)", scene ? "entering" : "leaving", time_usec() / 1e6, (u32)draws);
+        g_wide = scene;
+    }
+}
 double present_aspect(u32 w, u32 h) {
     if (format().lines) return format().narrow ? 4.0 / 3.0 : 16.0 / 9.0;   // (the PS3 modes have non-square pixels)
     return wide_frame() ? (double)w * res_scale_x() / (h * res_scale_y()) : (double)w / h;
@@ -96,9 +113,11 @@ void hud_rect(u32 pw, u32 ph, float* x, float* y, float* w, float* h) {
 bool camera_projection_hook(PPUContext& c) {
     static thread_local bool inside = false;
     const u32 cam = (u32)c.r[3];
-    if (inside || !rsx::wide_frame()) return false;
+    if (inside) return false;
     const float aspect = std::bit_cast<float>(ld32(cam + 0x23C)), base = 16.0f / 9.0f;
     if (std::fabs(aspect - base) > 0.001f) return false;
+    rsx::g_cameras++;
+    if (!rsx::wide_frame()) return false;
     const float target = base * rsx::res_scale_x() / rsx::res_scale_y();
     const u32 fov = ld32(cam + 0x238), aspect_bits = ld32(cam + 0x23C), flags = ld32(cam + 0x234);
     if (target < base) st32(cam + 0x238, std::bit_cast<u32>(2 * std::atan(std::tan(std::bit_cast<float>(fov) / 2) * base / target)));
