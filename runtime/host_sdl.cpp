@@ -13,6 +13,9 @@
 void set_thread_name(const char* name);   // core.cpp
 
 namespace host {
+void wheel_poll();                      // wheel_sdl.cpp (UI thread)
+void wheel_close();
+bool wheel_owns(SDL_JoystickID id);
 namespace {
 std::mutex g_pad_mutex;
 PadState g_pad;
@@ -142,11 +145,16 @@ void ui_thread() {
             if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
                 (e.key.key == SDLK_F11 || (e.key.key == SDLK_RETURN && (e.key.mod & SDL_KMOD_ALT))))
                 SDL_SetWindowFullscreen(win, (SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN) == 0);
-            if (e.type == SDL_EVENT_GAMEPAD_ADDED && !gp) gp = SDL_OpenGamepad(e.gdevice.which);
+            if (e.type == SDL_EVENT_GAMEPAD_ADDED && !gp && !wheel_owns(e.gdevice.which)) gp = SDL_OpenGamepad(e.gdevice.which);
             if (e.type == SDL_EVENT_GAMEPAD_REMOVED && gp && SDL_GetGamepadID(gp) == e.gdevice.which) {
                 SDL_CloseGamepad(gp);
                 gp = nullptr;
             }
+        }
+        wheel_poll();
+        if (gp && wheel_owns(SDL_GetGamepadID(gp))) {   // a wheel SDL also maps as a gamepad: it is the G25 only
+            SDL_CloseGamepad(gp);
+            gp = nullptr;
         }
         update_pad(gp);
         if (gp) {   // refreshed every 100 ms with a 200 ms duration, so the motors stop if the game stops updating them
@@ -162,6 +170,7 @@ void ui_thread() {
         }
         SDL_Delay(4);
     }
+    wheel_close();   // (no force left playing on the wheel)
 }
 }  // namespace
 
@@ -169,7 +178,9 @@ void init() {
     // (Linux: the app id names the window class / Wayland app id, matched by the launcher's .desktop file, and the
     // PulseAudio/PipeWire stream)
     SDL_SetAppMetadata("Formula One: Championship Edition (recompiled)", nullptr, "f1ce-recomp");
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
+    // (wheels: the input of a second monitor's game window keeps working while another window has the focus)
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD | SDL_INIT_JOYSTICK | SDL_INIT_HAPTIC)) {
         LOG_E("SDL_Init failed: %s", SDL_GetError());
         return;
     }
@@ -185,6 +196,7 @@ void init() {
 // for 200 ms at the given time (seconds since start); "60:r2:120" holds R2 for 120 s; "f8" = the F8 key (debug_keys).
 static std::atomic<u64> input_clock_start{0};
 void input_clock_reset() { input_clock_start = time_usec(); }
+double input_time() { return (time_usec() - input_clock_start.load()) / 1e6; }
 
 namespace {
 struct ScriptedPress { double t; int word; u16 bit; double dur; };

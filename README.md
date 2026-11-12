@@ -82,7 +82,7 @@ f1ce <path-to>/PS3_GAME [--trace]
 ```
 
 Or use `build-win/f1ce_launcher.exe`: it sets the display and speed options below, remembers them in
-`build-win/f1ce_launcher.ini` and starts the game from the folder above `build-win/`, without a console. Tabs: General (Video Settings, Game Settings), Quick Race Settings (`F1CE_QR_*` below) and Developer Tools (the debugging variables below, grouped, each with its description as a tooltip; value fields; "Other variables" takes any `NAME=value` list).
+`build-win/f1ce_launcher.ini` and starts the game from the folder above `build-win/`, without a console. Tabs: General (Video Settings, Game Settings), Quick Race Settings (`F1CE_QR_*` below), Steering Wheel (see below) and Developer Tools (the debugging variables below, grouped, each with its description as a tooltip; value fields; "Other variables" takes any `NAME=value` list).
 
 A 1280x720 window opens. Log in `f1ce_recomp.log`, saves in `ps3_data/` (both in the current folder).
 The console shows warnings and errors only; the log file has everything (`F1CE_LOG_CONSOLE=1` prints every line,
@@ -90,6 +90,47 @@ which slows the game noticeably in Git Bash / the Windows console).
 
 Keyboard: arrows = d-pad, **Z** = ✕, **X** = ◯, **A** = □, **S** = △, **Q/W** = L1/R1, **1/2** = L2/R2,
 **Enter** = Start, **Backspace** = Select, **I/J/K/L** = right stick (turns the external cameras). Gamepads are supported through SDL.
+
+### Steering wheels
+
+Any wheel SDL sees (Logitech, Thrustmaster, Fanatec, MOZA, PXN, Simucube, Cammus... by USB vendor or SDL's wheel
+type) is given to the game as a **Logitech G25**: the game has its own driver for Logitech wheels (`cellUsbd` extra
+LDDs for c283 c285 c293 c294 c295 c298 c299 ca03, report decoder 0x55a660) and its own force feedback, so
+`runtime/hle_usbd.cpp` emulates the USB device (descriptors, control/interrupt pipes, a G25 input report every 4 ms)
+and `runtime/wheel_sdl.cpp` reads the real wheel and plays the game's forces as SDL haptic effects. With a wheel
+attached the game makes it the player's controller (the pad's ✕ no longer starts a race).
+
+- Settings: the `[wheel]` section of `f1ce_launcher.ini` (`F1CE_WHEEL_INI=<file>` names another), written by the
+  launcher's Steering Wheel tab (modelled on the Thrustmaster control panel): device, steering axis/invert/centre, the
+  wheel's rotation as set in its own driver, the game's steering lock (default: the game's 900°, which it asks for
+  with the Driving Force Pro command `f8 02`), pedals calibrated by pressing them, button assignment by pressing them,
+  H-shifter gears, force-feedback gains (overall, road/tyre forces, centring spring, damper, wheel weight, minimum
+  force), auto-centre, soft lock, and test effects. Keys and defaults: `runtime/wheel_config.h`; without saved
+  settings the vendor's usual layout applies.
+- Profiles: `wheels/<name>.ini` next to the launcher (`[profile]` name, `wheels` = the vid:pid list it suits, notes;
+  `[wheel]` the settings without device and enabled), loaded and saved by the tab's Profile row. Built-in ones in
+  `launcher/wheels/` (copied next to the launcher on every build; ship the folder in release zips), axes, paddles,
+  H-shifter buttons, rotation and minimum force after Assetto Corsa's controller presets: Logitech G25, G27,
+  G29/G923 PS, G920/G923 Xbox, Thrustmaster T300/TX/T248, TX + Ferrari SF1000 (from this PC's Assetto Corsa setup),
+  T500 RS, T150/TMX, Fanatec CSL DD/ClubSport, MOZA R series, PXN. The first time the tab sees a wheel without saved
+  settings it loads the profile listing its vid:pid. Thrustmaster wheels: throttle Rz (axis 5), brake Y (axis 1),
+  right paddle button 1. Pedals on a separate USB device (Fanatec/MOZA/Simucube USB pedals) are not read.
+- Buttons, measured on the controller's action flags: G25 byte 1 bits 0/1 (the paddles) = gear up/down, Start =
+  pause, R2 = look back, L2 = change camera, Select, ✕ accept / ◯ back in menus, the hat = d-pad (in-race menus).
+- Force feedback: the game sends the Logitech classic protocol, but its send path 0x558160 overwrites byte 0 (slot and
+  command) with 3, so each force type is treated as its own slot: `08` variable force (level above 0x80 pushes left;
+  sign checked with the steering held by script), `0b` high-resolution centring spring (stiffness with speed),
+  `03 00..` all off. The game only computes forces (0x356c94) when the controller's force-feedback flag +0x14 is set
+  (0 in 01.00 profiles, like the vibration flag): `hle_rumble.cpp` sets it from the wheel's force-feedback setting.
+- Only one process can own a wheel's effects (a second one waits in `SDL_OpenHapticFromJoystick`): the launcher
+  releases the wheel before it starts the game.
+- The game's "Steering assistance" driving aid (on by default) still applies to wheel input.
+
+| Variable | Effect |
+|---|---|
+| `F1CE_WHEEL=0` | no wheel: the game sees no USB device |
+| `F1CE_WHEEL_LOG=1` | logs the LDD registrations, the reports (twice a second), every force command, the forces sent to the wheel (4/s), the player controller's action table and action flags |
+| `F1CE_WHEEL_INPUT=<script>` | scripted wheel input for tests, `F1CE_INPUT`'s clock: `51:cross,59:throttle=1:30,64:steer=0.5:2,70:gear=2:5` (buttons by their `[wheel]` key names); a wheel is attached even when none is plugged in |
 
 ## Linux and Steam Deck
 
@@ -1383,3 +1424,13 @@ banks, then waits for SPU work.
   neither; transitions are logged as `aspect: entering/leaving the wide format`. The launcher's window sizes gained
   2560x1080, 3440x1440 and 3840x2160. Checked by a scripted Silverstone race at 3440x1440 (one transition, picture and
   centred HUD right); the driver tests themselves not yet replayed.
+
+**2026-11-11 (later)** – steering wheel support. The game's own Logitech wheel driver now sees a G25 (`hle_usbd.cpp`:
+`cellUsbd` with probe/attach/detach, pipes and transfers on a `usbd` host thread); `wheel_sdl.cpp` turns any SDL wheel
+into its reports and plays its force feedback, tested on a Thrustmaster TX (SF1000 rim, 044f:b696): attach, steering,
+throttle, menus, pause, gear up/down by the wheel's buttons, ~2200 force commands per scripted race, the wheel turned by
+the game's forces and centred by its spring. New launcher tab "Steering Wheel" (`launcher/wheel_tab.cpp`, SDL linked
+into the launcher). Findings: the send path's byte-0 overwrite (0x558160), the force-feedback flag +0x14, the
+controller action tables (+0x44: one button index space in PS3 pad order), a destroyed DirectInput effect created
+again at once does not play on the TX (update effects in place). Not tested: real pedals and buttons pressed by hand,
+other vendors, unplugging during a race, Linux.

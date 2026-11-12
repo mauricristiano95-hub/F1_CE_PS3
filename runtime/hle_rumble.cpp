@@ -20,6 +20,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdlib>
+#include <string>
 
 #include "host.h"
 #include "kernel.h"
@@ -110,10 +111,33 @@ bool controller_update_hook(PPUContext& c) {
     const bool driving = (u32)c.r[4] != 0;
     // the update returns at once during its first 15 calls (counter at 0x70f648), without reaching the vibration
     const bool runs = (s32)ld32(ld32(0x70f648)) >= 15;
+    // the wheel force-feedback flag (+0x14, the profile's "controllerforcefeedback", 0 in 01.00 profiles): the update
+    // ends with the forces of 0x356c94 only when it is set (and the controller's device has force feedback, the G25
+    // of hle_usbd.cpp); the [wheel] ffb setting decides
+    st8(ctl + 0x14, host::wheel_ffb() ? 1 : 0);
+    static const bool wheel_log = getenv("F1CE_WHEEL_LOG") && atoi(getenv("F1CE_WHEEL_LOG"));
+    if (wheel_log && runs) {   // the controllers' action -> button index tables (+0x44..), once each
+        static u32 seen[4] = {};
+        u32* slot = std::find_if(seen, seen + 4, [&](u32 s) { return s == ctl || !s; });
+        if (slot != seen + 4 && *slot != ctl) {
+            *slot = ctl;
+            std::string w;
+            char b[16];
+            for (u32 o = 0; o < 0xc0; o += 4) { snprintf(b, sizeof(b), " %x", ld32(ctl + o)); w += b; }
+            LOG_I("controller %08x driving %d:%s", ctl, (int)driving, w.c_str());
+        }
+    }
     inside = true;
     sub_003574C0(c);
     inside = false;
     if (runs) ai_drive_update(c, ctl, driving);
+    if (wheel_log && runs) {   // the controller's action flags (+0x168) when they change
+        static u32 last = 0;
+        if (ld32(ctl + 0x168) != last) {
+            last = ld32(ctl + 0x168);
+            LOG_I("controller %08x actions %08x at %.2f s", ctl, last, host::input_time());
+        }
+    }
     if (!runs || strength() <= 0) return true;
     const bool flag = ld8(ctl + 0x15) != 0;
     static int last_flag = -1;

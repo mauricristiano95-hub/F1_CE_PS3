@@ -1,33 +1,37 @@
 // Launcher of the recompiled game: picks the options that are environment variables (README, "Debugging aids"), keeps
 // them in f1ce_launcher.ini next to the executable and starts f1ce.exe. The game runs from the folder above build-win,
 // the current folder of the old launch script: log and saves (ps3_data/) are relative to it.
-// Three tabs: General (Video Settings and Game Settings), Quick Race Settings (settings that replace the game menu's,
-// F1CE_QR_*) and Developer Tools (debugging variables, each with its README description as a tooltip).
+// Four tabs: General (Graphics Preset, Video Settings and Game Settings), Quick Race Settings (settings that replace the game menu's,
+// F1CE_QR_*), Steering Wheel (wheel_tab.cpp: the [wheel] section) and Developer Tools (debugging variables, each with
+// its README description as a tooltip).
 #include <windows.h>
 #include <commctrl.h>
 #include <uxtheme.h>
 #include <shlobj.h>
 #include <dxgi1_6.h>
+#include <cpuid.h>
 
 #include <algorithm>
 #include <filesystem>
 #include <string>
 #include <vector>
 
+#include "wheel_tab.h"
+
 namespace {
 struct Choice { const wchar_t* label; const wchar_t* value; };   // value nullptr: the variable stays unset
 
 // sections: group boxes, stacked in the columns of their tab
 struct Section { const wchar_t* title; int page, col; };
-enum { VIDEO, GAME, QR_RACE, QR_RULES, DEV_LOG, DEV_TIMING, DEV_SPU, DEV_VALUES, DEV_RENDER, DEV_VALUES2 };
+enum { PRESET, VIDEO, GAME, QR_RACE, QR_RULES, DEV_LOG, DEV_TIMING, DEV_SPU, DEV_VALUES, DEV_RENDER, DEV_VALUES2 };
 const Section g_sections[] = {
-    {L"Video Settings", 0, 0}, {L"Game Settings", 0, 1},
+    {L"Graphics Preset", 0, 0}, {L"Video Settings", 0, 0}, {L"Game Settings", 0, 1},
     {L"Race", 1, 0}, {L"Rules", 1, 1},
-    {L"Logging and profiling", 2, 0}, {L"Timing and threads", 2, 0}, {L"SPU and job manager", 2, 1},
-    {L"Values (empty: unset)", 2, 1}, {L"Renderer", 2, 2}, {L"Captures and tests", 2, 2},
+    {L"Logging and profiling", 3, 0}, {L"Timing and threads", 3, 0}, {L"SPU and job manager", 3, 1},
+    {L"Values (empty: unset)", 3, 1}, {L"Renderer", 3, 2}, {L"Captures and tests", 3, 2},
 };
-constexpr int PAGES = 3;
-const int g_cols[PAGES] = {2, 2, 3};
+constexpr int PAGES = 4, WHEEL_PAGE = 2, DEV_PAGE = 3;
+const int g_cols[PAGES] = {2, 2, 0, 3};   // (the wheel tab lays itself out)
 
 struct Combo {
     const wchar_t* label;
@@ -35,6 +39,7 @@ struct Combo {
     std::vector<Choice> choices;
     int def;
     int section;
+    const wchar_t* tip = nullptr;   // the label's and the box's tooltip
     HWND h = nullptr;
 };
 struct Check {
@@ -70,9 +75,11 @@ Combo g_combos[] = {
     {L"Vertical sync", L"F1CE_VSYNC", {{L"On", nullptr}, {L"Off", L"0"}, {L"Adaptive", L"-1"}}, 0, VIDEO},
     // launcher only (not passed to the game): sets the options of PRESET_ENVS (g_presets); "Custom" keeps the
     // player's own values, saved in the ini's [custom preset] section
-    {L"Graphics preset", L"preset",
+    {L"Preset", L"preset",
      {{L"Original (PS3)", L"original"}, {L"Low", L"low"}, {L"Medium", L"medium"}, {L"High", L"high"},
-      {L"Custom", L"custom"}}, 0, VIDEO},
+      {L"Custom", L"custom"}}, 0, PRESET,
+     L"Sets anti-aliasing, shadows, reflections, textures, car detail, motion blur and heat haze in Video Settings; "
+     L"changing one of them there makes it Custom (kept for the next time Custom is picked)."},
     {L"Anti-aliasing (MSAA)", L"F1CE_MSAA", {{L"2x", L"2"}, {L"4x (original)", nullptr}, {L"8x", L"8"}}, 1, VIDEO},
     {L"Shadow map resolution", L"F1CE_SHADOW_RES",
      {{L"512x1024 (low)", L"0.5"}, {L"1024x2048 (original)", L"1"}, {L"Internal resolution", nullptr},
@@ -103,10 +110,12 @@ Combo g_combos[] = {
      {{L"Off", L"0"}, {L"Light", L"50"}, {L"Normal", nullptr}, {L"Strong", L"150"}}, 2, GAME},
     // in-game cameras (runtime/hle_camera.cpp): the second TV pod camera of the view cycle as a broadcast T-cam, and
     // the right stick turning the chase cameras
-    {L"Onboard TV camera (2nd TV pod view)", L"F1CE_TVCAM",
-     {{L"On", nullptr}, {L"On, numpad tunes it (values on the console, saved in tvcam_tune.ini)", L"tune"},
-      {L"Off (original TV pod offset camera)", L"0"}}, 0, GAME},
-    {L"Chase camera look-around (right stick)", L"F1CE_CAM_ORBIT", {{L"On", nullptr}, {L"Off", L"0"}}, 0, GAME},
+    {L"Onboard TV camera", L"F1CE_TVCAM",
+     {{L"On", nullptr}, {L"On, tune with the numpad", L"tune"}, {L"Off (original camera)", L"0"}}, 0, GAME,
+     L"The second TV pod view of the camera cycle as a broadcast T-cam. Off: the game's own TV pod offset camera. "
+     L"Tune: the numpad moves it, the values show on the console and are saved in tvcam_tune.ini."},
+    {L"Chase cam look-around", L"F1CE_CAM_ORBIT", {{L"On", nullptr}, {L"Off", L"0"}}, 0, GAME,
+     L"The right stick turns the chase cameras around the car."},
     // the game's language when its menu is skipped (F1CE_SKIP_INTRO); otherwise the one the menu starts on
     // (runtime/hle_boot.cpp)
     {L"Language", L"F1CE_LANGUAGE",
@@ -187,6 +196,7 @@ Check g_checks[] = {
     {L"F1CE_TASK_DMA_LOG", L"F1CE_TASK_DMA_LOG", DEV_LOG, L"Logs each distinct DMA of the SPURS tasks once."},
     {L"F1CE_PM_SKIP_LOG", L"F1CE_PM_SKIP_LOG", DEV_LOG, L"Logs the job that follows 96+ skip entries of a job queue."},
     {L"F1CE_RUMBLE_LOG", L"F1CE_RUMBLE_LOG", DEV_LOG, L"Logs the player-car data that drives the gamepad vibration."},
+    {L"F1CE_WHEEL_LOG", L"F1CE_WHEEL_LOG", DEV_LOG, L"Logs the steering wheel's reports, force commands and the forces sent to it."},
     {L"F1CE_DUMP_SHADERS", L"F1CE_DUMP_SHADERS", DEV_LOG, L"Writes the generated shaders (fp_<hash>.glsl, vp_<hash>.glsl)."},
     {L"F1CE_60FPS_NOHOLD", L"F1CE_60FPS_NOHOLD", DEV_TIMING, L"With 60 fps: a stopped car in a race is not held at 30 fps."},
     {L"F1CE_TICKS_FIXED", L"F1CE_TICKS_FIXED", DEV_TIMING, L"With 60 fps: exactly one tick per frame whatever the time."},
@@ -250,6 +260,10 @@ HWND g_extra;
 
 enum { ID_START = 100, ID_BROWSE, ID_QUIT, ID_TAB, WM_GAME_EXIT = WM_APP + 1 };
 HWND g_path, g_main, g_tab, g_tips;
+// the resizable window: the tab control scrolls inside g_view (above a bar with Start and Quit) when the window is
+// smaller than the tabs' layout (pixels)
+HWND g_view, g_start, g_quit;
+int g_content_w, g_content_h, g_tab_w, g_tab_h, g_scroll_x, g_scroll_y;
 std::vector<HWND> g_page[PAGES];   // the controls of each tab
 HFONT g_font, g_bold;
 std::wstring g_exe_dir, g_run_dir, g_ini;
@@ -438,6 +452,7 @@ void load_settings() {
     }
     GetPrivateProfileStringW(L"developer", EXTRA_KEY, L"", b, MAX_PATH * 2, g_ini.c_str());
     SetWindowTextW(g_extra, b);
+    wheeltab::load(g_ini);
 }
 
 void save_settings() {
@@ -454,6 +469,7 @@ void save_settings() {
     }
     const std::wstring extra = window_text(g_extra);
     WritePrivateProfileStringW(L"developer", EXTRA_KEY, extra.empty() ? nullptr : extra.c_str(), g_ini.c_str());
+    wheeltab::save(g_ini);
 }
 
 DWORD WINAPI wait_game(void* process) {
@@ -465,10 +481,47 @@ DWORD WINAPI wait_game(void* process) {
     return 0;
 }
 
+// f1ce.exe is built for x86-64-v3 (ARCH_FLAGS in CMakeLists.txt): on an older CPU it dies with an illegal
+// instruction (0xC000001D) before it can open its log, so name what is missing here instead
+std::wstring missing_cpu_features() {
+    unsigned a, b, c, d;
+    std::wstring m;
+    auto need = [&](bool ok, const wchar_t* name) { if (!ok) m += (m.empty() ? L"" : L", ") + std::wstring(name); };
+    if (!__get_cpuid(1, &a, &b, &c, &d)) return L"CPUID";
+    const bool osxsave = c & bit_OSXSAVE;
+    unsigned lo = 0, hi = 0;
+    if (osxsave) __asm__("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
+    need(c & bit_SSE42, L"SSE4.2");
+    need(c & bit_POPCNT, L"POPCNT");
+    need((c & bit_AVX) && osxsave && (lo & 6) == 6, L"AVX");
+    need(c & bit_FMA, L"FMA3");
+    need(c & bit_F16C, L"F16C");
+    need(c & bit_MOVBE, L"MOVBE");
+    if (!__get_cpuid_count(7, 0, &a, &b, &c, &d)) b = 0;
+    need(b & bit_AVX2, L"AVX2");
+    need(b & bit_BMI, L"BMI1");
+    need(b & bit_BMI2, L"BMI2");
+    if (!__get_cpuid(0x80000001, &a, &b, &c, &d)) c = 0;
+    need(c & bit_LZCNT, L"LZCNT");
+    return m;
+}
+
 void start_game() {
     std::wstring game = window_text(g_path), exe = g_exe_dir + L"\\f1ce.exe";
+    if (const std::wstring m = missing_cpu_features(); !m.empty()) {
+        const std::wstring msg = L"This CPU cannot run the game: it lacks " + m + L".\n\n"
+            L"F1 CE needs a processor with AVX2 (Intel Core 4th generation \"Haswell\" / AMD Ryzen or newer).";
+        MessageBoxW(g_main, msg.c_str(), L"F1 CE", MB_ICONERROR);
+        return;
+    }
     if (!is_file(game + L"\\USRDIR\\EBOOT.BIN") && !is_file(game + L"\\PARAM.SFO")) {
         MessageBoxW(g_main, L"This folder does not look like the game's PS3_GAME folder.", L"F1 CE", MB_ICONWARNING);
+        return;
+    }
+    if (!is_file(game + L"\\USRDIR\\EBOOT.elf")) {
+        MessageBoxW(g_main, L"USRDIR\\EBOOT.elf was not found in this PS3_GAME folder.\n\n"
+                    L"The game needs the decrypted executable (EBOOT.elf) next to EBOOT.BIN; "
+                    L"the encrypted EBOOT.BIN alone does not work.", L"F1 CE", MB_ICONWARNING);
         return;
     }
     save_settings();
@@ -497,6 +550,7 @@ void start_game() {
             s = e;
         }
     }
+    wheeltab::release();   // (the game opens the wheel's force feedback itself; one process at a time)
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
@@ -550,30 +604,57 @@ void add_tip(HWND c, const wchar_t* text) {
 void show_page(int page) {
     for (int p = 0; p < PAGES; p++)
         for (HWND c : g_page[p]) ShowWindow(c, p == page ? SW_SHOW : SW_HIDE);
+    wheeltab::shown(page == WHEEL_PAGE);
     // the transparent labels leave the hidden page's pixels behind unless the whole body is painted again
-    RedrawWindow(g_tab, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+    RedrawWindow(g_tab, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
-constexpr int WIN_W = 900, MARGIN = 14, LABEL_W = 150, ROW = 30, GAP = 12;
+constexpr int WIN_W = 900, MARGIN = 14, LABEL_W = 150, ROW = 30, GAP = 12, BAR_H = 12 + 28 + MARGIN;
 
 // the tab control passes its children's notifications and colour requests on to the main window
 LRESULT CALLBACK tab_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
-    if (msg == WM_COMMAND || msg == WM_CTLCOLORSTATIC || msg == WM_DRAWITEM) return SendMessageW(g_main, msg, wp, lp);
+    if (msg == WM_COMMAND || msg == WM_CTLCOLORSTATIC || msg == WM_DRAWITEM || msg == WM_HSCROLL)
+        return SendMessageW(g_main, msg, wp, lp);
     return DefSubclassProc(h, msg, wp, lp);
+}
+
+// the width of a text in g_font, in 96 dpi units
+int text_w(const wchar_t* t) {
+    HDC dc = GetDC(nullptr);
+    HGDIOBJ old = SelectObject(dc, g_font);
+    SIZE sz{};
+    GetTextExtentPoint32W(dc, t, (int)wcslen(t), &sz);
+    SelectObject(dc, old);
+    ReleaseDC(nullptr, dc);
+    return MulDiv(sz.cx, 96, GetDpiForSystem());
 }
 
 // one group box with its options; returns the y below it
 int build_section(int s, int x, int y, int w) {
-    const int page = g_sections[s].page, dev = page == 2;
+    const int page = g_sections[s].page, dev = page == DEV_PAGE;
     HWND group = add(L"BUTTON", g_sections[s].title, BS_GROUPBOX, x, y, w, 100, 0, page);
     const int ix = x + 10, iw = w - 20, top = y;
     y += 22;
-    const int label_w = dev ? std::min(LABEL_W + 20, iw / 2 + 30) : LABEL_W;
+    // labels are not cut: the column widens for the longest one (up to half the box)
+    int label_w = dev ? std::min(LABEL_W + 20, iw / 2 + 30) : LABEL_W;
+    for (const Combo& c : g_combos)
+        if (c.section == s) label_w = std::max(label_w, std::min(text_w(c.label) + 10, iw / 2));
     for (Combo& c : g_combos) {
         if (c.section != s) continue;
-        add(L"STATIC", c.label, 0, ix, y + 3, label_w, 18, 0, page);
+        HWND l = add(L"STATIC", c.label, SS_NOTIFY | SS_ENDELLIPSIS, ix, y + 3, label_w, 18, 0, page);
         c.h = add(L"COMBOBOX", L"", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, ix + label_w, y, iw - label_w, 240, 0, page);
-        for (const Choice& ch : c.choices) SendMessageW(c.h, CB_ADDSTRING, 0, (LPARAM)ch.label);
+        int list_w = 0;
+        for (const Choice& ch : c.choices) {
+            SendMessageW(c.h, CB_ADDSTRING, 0, (LPARAM)ch.label);
+            list_w = std::max(list_w, text_w(ch.label));
+        }
+        // (the list drops wider than the box when a choice is longer; the box shows it with an ellipsis)
+        const int dpi = GetDpiForSystem();
+        SendMessageW(c.h, CB_SETDROPPEDWIDTH, MulDiv(list_w + 16, dpi, 96) + GetSystemMetricsForDpi(SM_CXVSCROLL, dpi), 0);
+        if (c.tip) {
+            add_tip(l, c.tip);
+            add_tip(c.h, c.tip);
+        }
         y += ROW;
     }
     for (Field& f : g_fields) {
@@ -605,8 +686,12 @@ int build_section(int s, int x, int y, int w) {
 // returns the height of the window's client area
 int build_controls() {
     const int top = TAB_TOP + TAB_HEAD + 10, inner = MARGIN + 6, inner_w = WIN_W - 2 * inner;
+    g_view = CreateWindowExW(WS_EX_CONTROLPARENT, L"F1CELauncherView", L"",
+                             WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_VSCROLL | WS_HSCROLL, 0, 0, 100, 100, g_main,
+                             nullptr, GetModuleHandleW(nullptr), nullptr);
     // (no WS_CLIPCHILDREN: the group boxes are transparent, the tab paints its body under them)
     g_tab = add(WC_TABCONTROLW, L"", WS_TABSTOP, TAB_X, TAB_TOP, WIN_W - 2 * TAB_X, 100, ID_TAB);
+    SetParent(g_tab, g_view);   // (same place: the view starts at the client's corner)
     SetWindowLongPtrW(g_tab, GWL_EXSTYLE, GetWindowLongPtrW(g_tab, GWL_EXSTYLE) | WS_EX_CONTROLPARENT);   // (Tab key)
     SetWindowSubclass(g_tab, tab_proc, 1, 0);
     g_tips = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP, 0, 0, 0, 0, g_main, nullptr,
@@ -614,7 +699,7 @@ int build_controls() {
     SendMessageW(g_tips, TTM_SETMAXTIPWIDTH, 0, 420);
     TCITEMW ti{};
     ti.mask = TCIF_TEXT;
-    const wchar_t* names[PAGES] = {L"General", L"Quick Race Settings", L"Developer Tools"};
+    const wchar_t* names[PAGES] = {L"General", L"Quick Race Settings", L"Steering Wheel", L"Developer Tools"};
     for (int p = 0; p < PAGES; p++) {
         ti.pszText = (LPWSTR)names[p];
         SendMessageW(g_tab, TCM_INSERTITEMW, p, (LPARAM)&ti);
@@ -629,6 +714,10 @@ int build_controls() {
             add(L"BUTTON", L"Browse...", WS_TABSTOP, inner + inner_w - 80, y0 + 20, 80, 24, ID_BROWSE, 0);
             y0 += 56;
         }
+        if (p == WHEEL_PAGE) {
+            bottom = std::max(bottom, wheeltab::build(g_main, p, inner, y0, inner_w, add, add_tip) + 8);
+            continue;
+        }
         const int cols = g_cols[p], col_w = (inner_w - (cols - 1) * GAP) / cols;
         int y_end = y0;
         for (int col = 0; col < cols; col++) {
@@ -642,28 +731,99 @@ int build_controls() {
             add(L"STATIC", L"Used by the next Quick Race in place of the game menu's choices (the menu still shows its own).",
                 0, inner, y, inner_w, 18, 0, 1);
             y += 24;
-        } else if (p == 2) {
-            add(L"STATIC", L"Other variables (NAME=value, separated by spaces)", 0, inner, y + 4, 300, 18, 0, 2);
-            g_extra = add(L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, inner + 300, y, inner_w - 300, 24, 0, 2);
+        } else if (p == DEV_PAGE) {
+            add(L"STATIC", L"Other variables (NAME=value, separated by spaces)", 0, inner, y + 4, 300, 18, 0, DEV_PAGE);
+            g_extra = add(L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, inner + 300, y, inner_w - 300, 24, 0, DEV_PAGE);
             y += 32;
             add(L"STATIC", L"For debugging: these options slow the game down or change how it runs. Hover an option for "
-                L"what it does (README, \"Debugging aids\"). Leave them off for normal play.", 0, inner, y, inner_w, 34, 0, 2);
+                L"what it does (README, \"Debugging aids\"). Leave them off for normal play.", 0, inner, y, inner_w, 34, 0, DEV_PAGE);
             y += 38;
         }
         bottom = std::max(bottom, y);
     }
     const int dpi = GetDpiForSystem();
     int y = bottom + 4;
-    SetWindowPos(g_tab, nullptr, 0, 0, MulDiv(WIN_W - 2 * TAB_X, dpi, 96), MulDiv(y - TAB_TOP, dpi, 96), SWP_NOMOVE | SWP_NOZORDER);
-    y += 12;
-    add(L"BUTTON", L"Start", WS_TABSTOP | BS_DEFPUSHBUTTON, WIN_W - 2 * MARGIN - 180, y, 90, 28, ID_START);
-    add(L"BUTTON", L"Quit", WS_TABSTOP, WIN_W - MARGIN - 90, y, 90, 28, ID_QUIT);
-    return y + 28 + MARGIN;
+    g_tab_w = MulDiv(WIN_W - 2 * TAB_X, dpi, 96);
+    g_tab_h = MulDiv(y - TAB_TOP, dpi, 96);
+    g_content_w = MulDiv(WIN_W, dpi, 96);
+    g_content_h = MulDiv(y + 4, dpi, 96);
+    // (placed by layout)
+    g_start = add(L"BUTTON", L"Start", WS_TABSTOP | BS_DEFPUSHBUTTON, 0, 0, 90, 28, ID_START);
+    g_quit = add(L"BUTTON", L"Quit", WS_TABSTOP, 0, 0, 90, 28, ID_QUIT);
+    return y + 4 + BAR_H;
+}
+
+// places the view, the tab control (scrolled, stretched to a larger view) and the buttons after a resize or scroll
+void layout() {
+    const int dpi = GetDpiForSystem();
+    auto px = [&](int v) { return MulDiv(v, dpi, 96); };
+    RECT rc;
+    GetClientRect(g_main, &rc);
+    const int bar = px(BAR_H), vh = std::max<int>(rc.bottom - bar, 0);
+    MoveWindow(g_view, 0, 0, rc.right, vh, TRUE);
+    // (twice: a scroll bar appearing narrows the other direction)
+    RECT vc;
+    for (int pass = 0; pass < 2; pass++) {
+        GetClientRect(g_view, &vc);
+        g_scroll_y = std::clamp(g_scroll_y, 0, std::max<int>(g_content_h - vc.bottom, 0));
+        SCROLLINFO si{sizeof(si), SIF_RANGE | SIF_PAGE | SIF_POS, 0, g_content_h - 1, (UINT)vc.bottom, g_scroll_y, 0};
+        SetScrollInfo(g_view, SB_VERT, &si, TRUE);
+        g_scroll_x = std::clamp(g_scroll_x, 0, std::max<int>(g_content_w - vc.right, 0));
+        si.nMax = g_content_w - 1;
+        si.nPage = (UINT)vc.right;
+        si.nPos = g_scroll_x;
+        SetScrollInfo(g_view, SB_HORZ, &si, TRUE);
+    }
+    GetClientRect(g_view, &vc);
+    MoveWindow(g_tab, px(TAB_X) - g_scroll_x, px(TAB_TOP) - g_scroll_y, std::max<int>(g_tab_w, vc.right - 2 * px(TAB_X)),
+               std::max<int>(g_tab_h, vc.bottom - px(TAB_TOP) - px(4)), TRUE);
+    // (the move scrolls the old pixels and repaints only what it uncovers: the tab body, painted under its children,
+    // then covered controls that were not invalidated, the sliders first; everything is drawn again, as in show_page)
+    RedrawWindow(g_tab, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    const int by = rc.bottom - px(28 + MARGIN);
+    MoveWindow(g_start, rc.right - px(2 * MARGIN + 180), by, px(90), px(28), TRUE);
+    MoveWindow(g_quit, rc.right - px(MARGIN + 90), by, px(90), px(28), TRUE);
+}
+
+void scroll_view(int bar, int code, int delta) {
+    SCROLLINFO si{sizeof(si), SIF_ALL};
+    GetScrollInfo(g_view, bar, &si);
+    int pos = si.nPos;
+    const int line = MulDiv(40, GetDpiForSystem(), 96);
+    switch (code) {
+        case SB_LINEUP: pos -= line; break;
+        case SB_LINEDOWN: pos += line; break;
+        case SB_PAGEUP: pos -= (int)si.nPage; break;
+        case SB_PAGEDOWN: pos += (int)si.nPage; break;
+        case SB_THUMBTRACK: case SB_THUMBPOSITION: pos = si.nTrackPos; break;
+        case SB_TOP: pos = 0; break;
+        case SB_BOTTOM: pos = si.nMax; break;
+        case -1: pos += delta; break;   // (mouse wheel)
+    }
+    (bar == SB_VERT ? g_scroll_y : g_scroll_x) = pos;
+    layout();
+}
+
+// the view passes its children's (the tab control's) notifications on to the main window and scrolls
+LRESULT CALLBACK view_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_VSCROLL: case WM_HSCROLL:
+            if (lp) return SendMessageW(g_main, msg, wp, lp);
+            scroll_view(msg == WM_VSCROLL ? SB_VERT : SB_HORZ, LOWORD(wp), 0);
+            return 0;
+        case WM_MOUSEWHEEL:
+            scroll_view(SB_VERT, -1, -MulDiv(GET_WHEEL_DELTA_WPARAM(wp), MulDiv(80, GetDpiForSystem(), 96), WHEEL_DELTA));
+            return 0;
+        case WM_COMMAND: case WM_NOTIFY: case WM_CTLCOLORSTATIC: case WM_DRAWITEM:
+            return SendMessageW(g_main, msg, wp, lp);
+    }
+    return DefWindowProcW(h, msg, wp, lp);
 }
 
 LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_COMMAND:
+            if (wheeltab::command((HWND)lp, LOWORD(wp), HIWORD(wp))) return 0;
             if (LOWORD(wp) == ID_START) start_game();
             else if (LOWORD(wp) == ID_BROWSE) browse();
             else if (LOWORD(wp) == ID_QUIT) DestroyWindow(h);
@@ -681,8 +841,25 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             // (these classes draw with their parent's clip region: without a rectangle the whole tab body would be
             // repainted over the controls drawn before; a group box would cover the options inside it)
             const HWND c = (HWND)lp;
-            wchar_t cls[16] = {};
-            GetClassNameW(c, cls, 16);
+            wchar_t cls[32] = {};
+            GetClassNameW(c, cls, 32);
+            if (!_wcsicmp(cls, TRACKBAR_CLASSW)) {
+                // sliders (Steering Wheel tab): a solid brush of the tab body's colour, sampled once. With the parent's
+                // background drawn into them they painted only the first time, then stayed blank (after a scroll)
+                static HBRUSH body = [&] {
+                    HDC mem = CreateCompatibleDC((HDC)wp);
+                    HBITMAP bmp = CreateCompatibleBitmap((HDC)wp, 4, 4);
+                    HGDIOBJ old = SelectObject(mem, bmp);
+                    RECT r{0, 0, 4, 4};
+                    DrawThemeParentBackground(c, mem, &r);
+                    const COLORREF col = GetPixel(mem, 2, 2);
+                    SelectObject(mem, old);
+                    DeleteObject(bmp);
+                    DeleteDC(mem);
+                    return CreateSolidBrush(col);
+                }();
+                return (LRESULT)body;
+            }
             if (_wcsicmp(cls, L"Button") || (GetWindowLongPtrW(c, GWL_STYLE) & BS_TYPEMASK) != BS_GROUPBOX) {
                 RECT rc;
                 GetClientRect(c, &rc);
@@ -691,8 +868,26 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             SetBkMode((HDC)wp, TRANSPARENT);
             return (LRESULT)GetStockObject(NULL_BRUSH);
         }
+        case WM_HSCROLL:
+            wheeltab::hscroll((HWND)lp);
+            return 0;
+        case WM_SIZE:
+            if (g_view) layout();
+            return 0;
+        case WM_MOUSEWHEEL:
+            if (g_view) SendMessageW(g_view, msg, wp, lp);
+            return 0;
+        case WM_GETMINMAXINFO: {
+            const int dpi = GetDpiForSystem();
+            ((MINMAXINFO*)lp)->ptMinTrackSize = {MulDiv(480, dpi, 96), MulDiv(360, dpi, 96)};
+            return 0;
+        }
+        case WM_TIMER:
+            if (wp == wheeltab::TIMER_ID) wheeltab::timer();
+            return 0;
         case WM_DRAWITEM: {   // a check box's note: word-wrapped, its warning head bold red
             const DRAWITEMSTRUCT* d = (const DRAWITEMSTRUCT*)lp;
+            if (wheeltab::draw(d)) return TRUE;
             const wchar_t* text = (const wchar_t*)GetWindowLongPtrW(d->hwndItem, GWLP_USERDATA);
             if (!text) return FALSE;
             RECT rc = d->rcItem;
@@ -735,13 +930,19 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_GAME_EXIT:
             ShowWindow(h, SW_SHOW);
             SetForegroundWindow(h);
+            wheeltab::shown((int)SendMessageW(g_tab, TCM_GETCURSEL, 0, 0) == WHEEL_PAGE);
             if (wp) {
-                std::wstring msg2 = L"The game stopped with code " + std::to_wstring((unsigned)wp) + L".\nSee " + g_run_dir + L"\\f1ce_recomp.log";
+                wchar_t hex[16];
+                swprintf(hex, 16, L"0x%08X", (unsigned)wp);
+                std::wstring msg2 = L"The game stopped with code " + std::to_wstring((unsigned)wp) + L" (" + hex + L").\n";
+                if ((unsigned)wp == 0xC000001D) msg2 += L"Illegal instruction: this CPU lacks an instruction set the game needs (AVX2).\n";
+                msg2 += L"See " + g_run_dir + L"\\f1ce_recomp.log";
                 MessageBoxW(h, msg2.c_str(), L"F1 CE", MB_ICONERROR);
             }
             return 0;
         case WM_DESTROY:
             save_settings();
+            WritePrivateProfileStringW(L"game", L"window_maximized", IsZoomed(h) ? L"1" : L"0", g_ini.c_str());
             PostQuitMessage(0);
             return 0;
     }
@@ -781,18 +982,34 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
     wc.lpszClassName = L"F1CELauncher";
     RegisterClassW(&wc);
+    wc.lpfnWndProc = view_proc;
+    wc.hIcon = nullptr;
+    wc.lpszClassName = L"F1CELauncherView";
+    RegisterClassW(&wc);
 
     INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_TAB_CLASSES | ICC_BAR_CLASSES};
     InitCommonControlsEx(&icc);
-    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    const DWORD style = WS_OVERLAPPEDWINDOW;   // (resizable, maximize button: the tabs scroll when it is smaller)
     const int dpi = GetDpiForSystem();
-    g_main = CreateWindowW(wc.lpszClassName, L"Formula One: Championship Edition", style, CW_USEDEFAULT, CW_USEDEFAULT,
+    g_main = CreateWindowW(L"F1CELauncher", L"Formula One: Championship Edition", style, CW_USEDEFAULT, CW_USEDEFAULT,
                            100, 100, nullptr, nullptr, inst, nullptr);
     RECT r{0, 0, MulDiv(WIN_W, dpi, 96), MulDiv(build_controls(), dpi, 96)};   // (the size follows the controls)
     AdjustWindowRect(&r, style, FALSE);
-    SetWindowPos(g_main, nullptr, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER);
+    {   // ... within the screen's work area, centred
+        MONITORINFO mi{sizeof(mi)};
+        GetMonitorInfoW(MonitorFromWindow(g_main, MONITOR_DEFAULTTONEAREST), &mi);
+        const RECT& wa = mi.rcWork;
+        const int hh = std::min<int>(r.bottom - r.top, wa.bottom - wa.top);
+        // (shorter than the tabs: room for the vertical scroll bar, so that no horizontal one is needed)
+        const int sb = hh < r.bottom - r.top ? GetSystemMetricsForDpi(SM_CXVSCROLL, dpi) : 0;
+        const int w = std::min<int>(r.right - r.left + sb, wa.right - wa.left);
+        SetWindowPos(g_main, nullptr, wa.left + (wa.right - wa.left - w) / 2, wa.top + (wa.bottom - wa.top - hh) / 2, w, hh,
+                     SWP_NOZORDER);
+    }
+    layout();
     load_settings();
-    ShowWindow(g_main, show);
+    wheeltab::start();   // (finding and opening the wheel takes about a second: in the background from now on)
+    ShowWindow(g_main, GetPrivateProfileIntW(L"game", L"window_maximized", 0, g_ini.c_str()) ? SW_SHOWMAXIMIZED : show);
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {

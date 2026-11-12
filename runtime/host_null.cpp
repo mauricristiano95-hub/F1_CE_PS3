@@ -7,7 +7,13 @@ void init() { LOG_I("host: headless backend"); }
 PadState pad_state() { return {}; }
 u32 debug_keys() { return 0; }
 void pad_rumble(float, float) {}
+const char* const WHEEL_BUTTON_KEYS[WHEEL_BUTTONS] = {};
+WheelInput wheel_input() { return {}; }
+void wheel_forces(const WheelForces&) {}
+void wheel_lock_deg(int) {}
+bool wheel_ffb() { return false; }
 void input_clock_reset() {}
+double input_time() { return 0; }
 bool quit_requested() { return false; }
 void request_quit() {}
 bool audio_push(const float*, u32) { return true; }

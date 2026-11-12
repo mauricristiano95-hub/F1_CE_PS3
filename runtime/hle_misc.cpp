@@ -1,4 +1,4 @@
-// HLE: sys_io (pad/keyboard/mouse), sys_fs (cellFs*), cellSysutil, cellAudio, cellUsbd.
+// HLE: sys_io (pad/keyboard/mouse), sys_fs (cellFs*), cellSysutil, cellAudio.
 #include "host.h"
 #include "kernel.h"
 #include "lv2_fs.h"
@@ -204,13 +204,7 @@ HLE_FUNC(cellDiscGameGetBootDiscInfo) {
 }
 HLE_FUNC(cellDiscGameRegisterDiscChangeCallback) { RET(CELL_OK); }
 
-// ================================================================== cellUsbd (no USB wheel attached)
-HLE_FUNC(cellUsbdInit) { RET(CELL_OK); }
-HLE_FUNC(cellUsbdRegisterExtraLdd) { RET(0); }
-HLE_FUNC(cellUsbdUnregisterExtraLdd) { RET(CELL_OK); }
-HLE_FUNC(cellUsbdScanStaticDescriptor) { RET(0); }
-HLE_FUNC(cellUsbdOpenPipe) { RET((s32)0x80110003); }   // CELL_USBD_ERROR_NO_MEMORY-style failure
-HLE_FUNC(cellUsbdClosePipe) { RET(CELL_OK); }
+// (cellUsbd: hle_usbd.cpp)
 
 // ================================================================== cellAudio
 namespace {

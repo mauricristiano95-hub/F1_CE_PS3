@@ -6,6 +6,12 @@
 #include <filesystem>
 #include <fstream>
 #include <vector>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <shellapi.h>
+#endif
 
 u32 g_tls_addr = 0, g_tls_filesz = 0, g_tls_memsz = 0;
 u32 g_malloc_pagesize = 0x100000;
@@ -96,8 +102,18 @@ int main(int argc, char** argv) {
     limit_cpus();
     // Usage: f1ce [path/to/PS3_GAME] [--trace]
     std::string game = "PS3_GAME";
+    std::vector<std::string> args(argv, argv + argc);
+#ifdef _WIN32
+    // argv is in the ANSI code page, which mangles accented folder names (C:\Users\José\...): take the UTF-16
+    // command line and keep the arguments as UTF-8 like every other path here
+    if (wchar_t** wargv = CommandLineToArgvW(GetCommandLineW(), &argc)) {
+        args.clear();
+        for (int i = 0; i < argc; i++) args.push_back(PATH_STR(fs::path(wargv[i])));
+        LocalFree(wargv);
+    }
+#endif
     for (int i = 1; i < argc; i++) {
-        std::string a = argv[i];
+        const std::string& a = args[i];
         if (a == "--trace") g_log_trace = true;
         else game = a;
     }

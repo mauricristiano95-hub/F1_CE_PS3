@@ -72,6 +72,7 @@ set(RUNTIME_SOURCES
   runtime/hle_physics.cpp
   runtime/hle_rumble.cpp
   runtime/hle_aidrive.cpp
+  runtime/hle_usbd.cpp
   runtime/hle_camera.cpp
   runtime/hle_gcm.cpp
   runtime/hle_spurs.cpp
@@ -80,7 +81,7 @@ set(RUNTIME_SOURCES
   runtime/spu_pm.cpp
 )
 if(F1CE_HOST STREQUAL "SDL")
-  list(APPEND RUNTIME_SOURCES runtime/host_sdl.cpp runtime/rsx.cpp runtime/rsx_common.cpp runtime/rsx_gl.cpp)
+  list(APPEND RUNTIME_SOURCES runtime/host_sdl.cpp runtime/wheel_sdl.cpp runtime/rsx.cpp runtime/rsx_common.cpp runtime/rsx_gl.cpp)
   set(SDL_SHARED OFF CACHE BOOL "" FORCE)
   set(SDL_STATIC ON CACHE BOOL "" FORCE)
   set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
@@ -147,17 +148,21 @@ if(F1CE_HOST STREQUAL "SDL")
     target_include_directories(f1ce PRIVATE third_party/SDL3-3.4.18/src/video/khronos)   # Vulkan headers
   endif()
   if(WIN32)
-    target_link_libraries(f1ce PRIVATE opengl32 winmm synchronization)
+    target_link_libraries(f1ce PRIVATE opengl32 winmm synchronization shell32)
   endif()
 endif()
 if(WIN32)
   target_link_options(f1ce PRIVATE -static -Wl,--stack,8388608 -Wl,-Map=f1ce.map)
   enable_language(RC)
-  add_executable(f1ce_launcher WIN32 launcher/f1ce_launcher.cpp launcher/f1ce_launcher.rc)
+  add_executable(f1ce_launcher WIN32 launcher/f1ce_launcher.cpp launcher/wheel_tab.cpp launcher/f1ce_launcher.rc)
   set_target_properties(f1ce_launcher PROPERTIES COMPILE_OPTIONS "" LINK_OPTIONS "")   # no PGO/LTO
   target_compile_definitions(f1ce_launcher PRIVATE UNICODE _UNICODE _WIN32_WINNT=0x0A00)
   target_link_options(f1ce_launcher PRIVATE -static -municode)
-  target_link_libraries(f1ce_launcher PRIVATE shell32 ole32 comctl32 uxtheme dxgi)
+  # (SDL: the Steering Wheel tab reads the wheel as the game does)
+  target_link_libraries(f1ce_launcher PRIVATE shell32 ole32 comctl32 uxtheme dxgi SDL3::SDL3-static)
+  # the built-in wheel profiles (Steering Wheel tab), next to the launcher
+  add_custom_command(TARGET f1ce_launcher POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/launcher/wheels $<TARGET_FILE_DIR:f1ce_launcher>/wheels)
 else()
   find_package(Threads REQUIRED)
   target_link_libraries(f1ce PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
