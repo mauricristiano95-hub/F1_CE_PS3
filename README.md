@@ -32,7 +32,8 @@ executable reads your own `PS3_GAME` folder at runtime.
 | `cmake/` | toolchains: Windows (llvm-mingw), Linux cross (zig, with `pkg-config.cmd` for the sysroot) |
 | `linux/` | Linux packaging: `AppRun` (launcher), `make_appimage.py`, `build_from_windows.sh`, `build.sh` + `Dockerfile` (native build) |
 | `tools/linux_sysroot.py`, `tools/pkgconfig.py` | Linux headers/sonames for SDL's backends in the zig cross build, and a pkg-config for them |
-| `third_party/` | SDL3 sources (not in git; download `SDL3-3.4.18` there) |
+| `launcher/` | the launchers: Win32 `f1ce_launcher.cpp` + `wheel_tab.cpp` (old), Dear ImGui `ui.cpp`, `options.cpp`, `ini.cpp`, `wheel_*.cpp`, `input_page.cpp` (new); shared `version.h`, `f1ce_launcher.rc`/`.ico`, `wheels/` profiles |
+| `third_party/` | SDL3, Dear ImGui and Exo 2 font sources (not in git; see [Launchers](#launchers) and Build) |
 
 ## Build
 
@@ -71,6 +72,43 @@ compile with instrumentation. A stale profile still works (changed functions jus
 changes to recomp.py or the runtime. `build-pgo` has no shader cache of its own: copy `build-win/shader_cache` next
 to it or set `F1CE_CACHE_DIR`.
 
+### Launchers
+
+Both launchers are targets of the same CMake project and are built by a plain `cmake --build build-win` along with
+the game. Neither takes PGO/LTO flags, so they are always built from `build-win`, not `build-pgo`. Both write and
+read `f1ce_launcher.ini` next to their executable, start `f1ce.exe` (`f1ce` on Linux) from their own folder and run
+it there (log, `ps3_data/` saves and `tvcam_tune.ini` stay next to the executables), and copy `launcher/wheels/`
+next to themselves after every build. Version and icon come from `launcher/version.h` and `launcher/f1ce_launcher.rc`
+(bump `F1CE_VERSION*` at every release).
+
+**Old launcher** (`f1ce_launcher`, Windows only): plain Win32 with tabs, plus SDL for the Steering Wheel tab.
+Sources `launcher/f1ce_launcher.cpp`, `launcher/wheel_tab.cpp`, `launcher/f1ce_launcher.rc`; no extra downloads.
+
+```sh
+cmake --build build-win -j 6 --target f1ce_launcher     # -> build-win/f1ce_launcher.exe + build-win/wheels/
+```
+
+**New launcher** (`f1ce_launcher_new`, Windows and Linux): Dear ImGui on SDL3's renderer, gamepad-first, with the
+fonts and logo compiled in (`launcher/embed.cmake` turns them into headers in `<build>/launcher_gen/`). It needs two
+more downloads in `third_party/` (not in git):
+
+- `third_party/imgui-1.93.0/`: Dear ImGui 1.93.0 (the release's source tree: `imgui*.cpp`, `imgui*.h`, `imstb_*.h`,
+  `backends/imgui_impl_sdl3.*` and `backends/imgui_impl_sdlrenderer3.*`)
+- `third_party/exo2/`: the Exo 2 static fonts `Exo2-BlackItalic.ttf`, `Exo2-ExtraBoldItalic.ttf`,
+  `Exo2-SemiBoldItalic.ttf`, `Exo2-Medium.ttf` (Google Fonts, SIL OFL; keep `OFL.txt`)
+
+```sh
+cmake --build build-win -j 6 --target f1ce_launcher_new     # -> build-win/f1ce_launcher_new.exe + build-win/wheels/
+cmake --build build-linux -j 6 --target f1ce_launcher_new   # Linux cross build (not packaged in the AppImage yet)
+```
+
+The new launcher hides its DEVELOPER section (and does not pass its options) unless `F1CE_DEV_MODE=1` is set in the
+environment or under `[game]` in the ini. It is not yet tested starting the game, with a wheel live view or a gamepad,
+or on Linux; once it is, the two targets swap names.
+
+For a release zip, strip the executables (`llvm-strip build-win/f1ce_launcher.exe`, or `-s` at link time), ship the
+template `f1ce_launcher.ini` (game path placeholder, no local paths) and the `wheels/` folder next to the launcher.
+
 `F1CE_HOST` selects the platform backend (`SDL` default, `NULL` = headless).
 `-DF1CE_TRACE_PC=ON` (off by default since 2026-10-31) records the guest PC of memory accesses for crash reports and
 enables `F1CE_WATCH_LINE` on PPU stores; without it crash reports give the function and LR only.
@@ -82,7 +120,8 @@ f1ce <path-to>/PS3_GAME [--trace]
 ```
 
 Or use `build-win/f1ce_launcher.exe`: it sets the display and speed options below, remembers them in
-`build-win/f1ce_launcher.ini` and starts the game from the folder above `build-win/`, without a console. Tabs: General (Video Settings, Game Settings), Quick Race Settings (`F1CE_QR_*` below), Steering Wheel (see below) and Developer Tools (the debugging variables below, grouped, each with its description as a tooltip; value fields; "Other variables" takes any `NAME=value` list).
+`build-win/f1ce_launcher.ini` and starts the game in `build-win/`, without a console (the new launcher,
+`f1ce_launcher_new.exe`, does the same with sections instead of tabs; see [Launchers](#launchers)). Tabs: General (Video Settings, Game Settings), Quick Race Settings (`F1CE_QR_*` below), Steering Wheel (see below) and Developer Tools (the debugging variables below, grouped, each with its description as a tooltip; value fields; "Other variables" takes any `NAME=value` list).
 
 A 1280x720 window opens. Log in `f1ce_recomp.log`, saves in `ps3_data/` (both in the current folder).
 The console shows warnings and errors only; the log file has everything (`F1CE_LOG_CONSOLE=1` prints every line,

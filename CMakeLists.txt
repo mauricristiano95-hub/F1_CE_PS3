@@ -163,7 +163,47 @@ if(WIN32)
   # the built-in wheel profiles (Steering Wheel tab), next to the launcher
   add_custom_command(TARGET f1ce_launcher POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/launcher/wheels $<TARGET_FILE_DIR:f1ce_launcher>/wheels)
-else()
+endif()
+# the new launcher (Dear ImGui on SDL3's renderer; Windows and Linux): its fonts and logo built into it
+if(F1CE_HOST STREQUAL "SDL")
+  set(LAUNCHER_GEN ${CMAKE_CURRENT_BINARY_DIR}/launcher_gen)
+  set(LAUNCHER_EMBEDS)
+  foreach(embed font_black_italic|third_party/exo2/Exo2-BlackItalic.ttf
+                font_extrabold_italic|third_party/exo2/Exo2-ExtraBoldItalic.ttf
+                font_semibold_italic|third_party/exo2/Exo2-SemiBoldItalic.ttf
+                font_medium|third_party/exo2/Exo2-Medium.ttf
+                logo_png|launcher/logo.png)
+    string(REPLACE "|" ";" embed ${embed})
+    list(GET embed 0 name)
+    list(GET embed 1 src)
+    add_custom_command(OUTPUT ${LAUNCHER_GEN}/${name}.h
+      COMMAND ${CMAKE_COMMAND} -DIN=${CMAKE_CURRENT_SOURCE_DIR}/${src} -DOUT=${LAUNCHER_GEN}/${name}.h -DNAME=${name}
+              -P ${CMAKE_CURRENT_SOURCE_DIR}/launcher/embed.cmake
+      DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${src} ${CMAKE_CURRENT_SOURCE_DIR}/launcher/embed.cmake)
+    list(APPEND LAUNCHER_EMBEDS ${LAUNCHER_GEN}/${name}.h)
+  endforeach()
+  set(IMGUI_DIR third_party/imgui-1.93.0)
+  add_executable(f1ce_launcher_new launcher/ui.cpp launcher/options.cpp launcher/ini.cpp launcher/wheel_device.cpp
+    launcher/wheel_page.cpp launcher/input_page.cpp ${IMGUI_DIR}/imgui.cpp ${IMGUI_DIR}/imgui_draw.cpp ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp ${IMGUI_DIR}/backends/imgui_impl_sdl3.cpp ${IMGUI_DIR}/backends/imgui_impl_sdlrenderer3.cpp
+    ${LAUNCHER_EMBEDS})
+  set_target_properties(f1ce_launcher_new PROPERTIES COMPILE_OPTIONS "" LINK_OPTIONS "")   # no PGO/LTO
+  target_include_directories(f1ce_launcher_new PRIVATE ${LAUNCHER_GEN} ${IMGUI_DIR})
+  target_link_libraries(f1ce_launcher_new PRIVATE SDL3::SDL3-static)
+  if(WIN32)
+    set_target_properties(f1ce_launcher_new PROPERTIES WIN32_EXECUTABLE ON)
+    target_sources(f1ce_launcher_new PRIVATE launcher/f1ce_launcher.rc)
+    target_compile_definitions(f1ce_launcher_new PRIVATE _WIN32_WINNT=0x0A00)
+    target_link_options(f1ce_launcher_new PRIVATE -static)
+    target_link_libraries(f1ce_launcher_new PRIVATE dxgi)
+    add_custom_command(TARGET f1ce_launcher_new POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/launcher/wheels $<TARGET_FILE_DIR:f1ce_launcher_new>/wheels)
+  else()
+    find_package(Threads REQUIRED)
+    target_link_libraries(f1ce_launcher_new PRIVATE Threads::Threads)
+  endif()
+endif()
+if(NOT WIN32)
   find_package(Threads REQUIRED)
   target_link_libraries(f1ce PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
   # native builds (linux/build.sh): libstdc++/libgcc linked in, so the AppImage needs only the build machine's glibc

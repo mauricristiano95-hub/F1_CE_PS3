@@ -5,10 +5,13 @@
 #include "host.h"
 #include "kernel.h"
 #include "rsx.h"
+#include "input_config.h"
+#include "wheel_config.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 
+#include <cstring>
 #include <vector>
 void set_thread_name(const char* name);   // core.cpp
 
@@ -39,77 +42,87 @@ enum : u16 {
     D2_R2 = 0x02, D2_L2 = 0x01,
 };
 
-u16 axis8(Sint16 v) { return (u16)std::clamp((v + 32768) >> 8, 0, 255); }
+u16 axis8(float v) { return (u16)std::clamp((int)std::floor(128 + v * 128), 0, 255); }   // -1..1: 0..255, 128 centred
+
+// the keyboard and gamepad bindings ([keyboard], [gamepad] of the launcher's ini: runtime/input_config.h)
+inputcfg::Config g_in;
+void load_input() {
+    const char* path = getenv("F1CE_WHEEL_INI") ? getenv("F1CE_WHEEL_INI") : "f1ce_launcher.ini";
+    const wheelcfg::Section kb = wheelcfg::read_section(path, "keyboard"), gp = wheelcfg::read_section(path, "gamepad");
+    inputcfg::load(g_in, [&](const char* s, const char* k) -> const char* {
+        const wheelcfg::Section& m = !strcmp(s, "keyboard") ? kb : gp;
+        auto it = m.find(k);
+        return it == m.end() ? nullptr : it->second.c_str();
+    });
+}
 
 void update_pad(SDL_Gamepad* gp) {
+    using namespace inputcfg;
     const bool* k = SDL_GetKeyboardState(nullptr);
+    // each control's value, 0..1: its keys, or its gamepad input (a button, or a stick / trigger half)
+    float key[CONTROLS] = {}, pad[PAD_CONTROLS] = {};
+    for (int c = 0; c < CONTROLS; c++)
+        for (int sc : g_in.keys[c])
+            if (sc > 0 && sc < SDL_SCANCODE_COUNT && k[sc]) key[c] = 1;
+    if (gp)
+        for (int c = 0; c < PAD_CONTROLS; c++) {
+            const int in = g_in.pad[c];
+            if (in == NONE) continue;
+            if (!is_axis(in)) {
+                pad[c] = SDL_GetGamepadButton(gp, (SDL_GamepadButton)(in - 1)) ? 1.0f : 0.0f;
+                continue;
+            }
+            const int a = (in - AXIS) / 2;
+            const float v = SDL_GetGamepadAxis(gp, (SDL_GamepadAxis)a) / 32767.0f;
+            const bool trigger = a == SDL_GAMEPAD_AXIS_LEFT_TRIGGER || a == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER;
+            pad[c] = std::clamp(trigger ? v : (in - AXIS) % 2 ? v : -v, 0.0f, 1.0f);
+        }
     PadState p;
-    auto set1 = [&](bool on, u16 bit) { if (on) p.digital1 |= bit; };
-    auto set2 = [&](bool on, u16 bit) { if (on) p.digital2 |= bit; };
-    // keyboard: arrows = d-pad, Z/X/A/S = cross/circle/square/triangle, Q/W = L1/R1, 1/2 = L2/R2,
-    // Enter = start, Backspace = select
-    set1(k[SDL_SCANCODE_LEFT], D1_LEFT); set1(k[SDL_SCANCODE_RIGHT], D1_RIGHT);
-    set1(k[SDL_SCANCODE_UP], D1_UP); set1(k[SDL_SCANCODE_DOWN], D1_DOWN);
-    set1(k[SDL_SCANCODE_RETURN], D1_START); set1(k[SDL_SCANCODE_BACKSPACE], D1_SELECT);
-    set2(k[SDL_SCANCODE_Z], D2_CROSS); set2(k[SDL_SCANCODE_X], D2_CIRCLE);
-    set2(k[SDL_SCANCODE_A], D2_SQUARE); set2(k[SDL_SCANCODE_S], D2_TRIANGLE);
-    set2(k[SDL_SCANCODE_Q], D2_L1); set2(k[SDL_SCANCODE_W], D2_R1);
-    set2(k[SDL_SCANCODE_1], D2_L2); set2(k[SDL_SCANCODE_2], D2_R2);
-    if (gp) {
-        set1(SDL_GetGamepadButton(gp, SDL_GAMEPAD_BUTTON_DPAD_LEFT), D1_LEFT);
-        set1(SDL_GetGamepadButton(gp, SDL_GAMEPAD_BUTTON_DPAD_RIGHT), D1_RIGHT);
-        set1(SDL_GetGamepadButton(gp, SDL_GAMEPAD_BUTTON_DPAD_UP), D1_UP);
-        set1(SDL_GetGamepadButton(gp, SDL_GAMEPAD_BUTTON_DPAD_DOWN), D1_DOWN);
-        set1(SDL_GetGamepadButton(gp, SDL_GAMEPAD_BUTTON_START), D1_START);
-        set1(SDL_GetGamepadButton(gp, SDL_GAMEPAD_BUTTON_BACK), D1_SELECT);
-        set1(SDL_GetGamepadButton(gp, SDL_GAMEPAD_BUTTON_LEFT_STICK), D1_L3);
-        set1(SDL_GetGamepadButton(gp, SDL_GAMEPAD_BUTTON_RIGHT_STICK), D1_R3);
-        set2(SDL_GetGamepadButton(gp, SDL_GAMEPAD_BUTTON_SOUTH), D2_CROSS);
-        set2(SDL_GetGamepadButton(gp, SDL_GAMEPAD_BUTTON_EAST), D2_CIRCLE);
-        set2(SDL_GetGamepadButton(gp, SDL_GAMEPAD_BUTTON_WEST), D2_SQUARE);
-        set2(SDL_GetGamepadButton(gp, SDL_GAMEPAD_BUTTON_NORTH), D2_TRIANGLE);
-        set2(SDL_GetGamepadButton(gp, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER), D2_L1);
-        set2(SDL_GetGamepadButton(gp, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER), D2_R1);
-        Sint16 lt = SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_LEFT_TRIGGER);
-        Sint16 rt = SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
-        set2(lt > 8000, D2_L2);
-        set2(rt > 8000, D2_R2);
-        p.lx = axis8(SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_LEFTX));
-        p.ly = axis8(SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_LEFTY));
-        p.rx = axis8(SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_RIGHTX));
-        p.ry = axis8(SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_RIGHTY));
-        p.pressure[10] = (u16)std::clamp(lt >> 7, 0, 255);   // L2 / R2 pressure
-        p.pressure[11] = (u16)std::clamp(rt >> 7, 0, 255);
-    }
-    // I/J/K/L = right stick (the external cameras turn with it, hle_camera.cpp)
-    if (k[SDL_SCANCODE_J] != k[SDL_SCANCODE_L]) p.rx = k[SDL_SCANCODE_J] ? 0 : 0xff;
-    if (k[SDL_SCANCODE_I] != k[SDL_SCANCODE_K]) p.ry = k[SDL_SCANCODE_I] ? 0 : 0xff;
-    // numpad = tuning keys (F1CE_TVCAM_TUNE, hle_camera.cpp): 8/2 up/down, 4/6 left/right, 9/3 back/forward,
-    // 7/1 tilt up/down, +/- field of view, 0 reset, 5 print
-    u32 dk = 0;
-    if (k[SDL_SCANCODE_KP_8]) dk |= DK_UP;
-    if (k[SDL_SCANCODE_KP_2]) dk |= DK_DOWN;
-    if (k[SDL_SCANCODE_KP_4]) dk |= DK_LEFT;
-    if (k[SDL_SCANCODE_KP_6]) dk |= DK_RIGHT;
-    if (k[SDL_SCANCODE_KP_9]) dk |= DK_BACK;
-    if (k[SDL_SCANCODE_KP_3]) dk |= DK_FWD;
-    if (k[SDL_SCANCODE_KP_7]) dk |= DK_PITCH_UP;
-    if (k[SDL_SCANCODE_KP_1]) dk |= DK_PITCH_DOWN;
-    if (k[SDL_SCANCODE_KP_PLUS]) dk |= DK_FOV_UP;
-    if (k[SDL_SCANCODE_KP_MINUS]) dk |= DK_FOV_DOWN;
-    if (k[SDL_SCANCODE_KP_0]) dk |= DK_RESET;
-    if (k[SDL_SCANCODE_KP_5]) dk |= DK_PRINT;
-    if (k[SDL_SCANCODE_F8]) dk |= DK_AI_TOGGLE;   // F8: AI control of the player's car (F1CE_AI_DRIVE, hle_aidrive.cpp)
-    g_debug_keys = dk;
-    // digital buttons report full pressure when pressed
-    static const struct { int word; u16 bit; int idx; } press[] = {
-        {1, D1_RIGHT, 0}, {1, D1_LEFT, 1}, {1, D1_UP, 2}, {1, D1_DOWN, 3}, {2, D2_TRIANGLE, 4}, {2, D2_CIRCLE, 5},
-        {2, D2_CROSS, 6}, {2, D2_SQUARE, 7}, {2, D2_L1, 8}, {2, D2_R1, 9},
+    // digital buttons and their pressure (CELL_PAD_CTRL_* order of the pressure array)
+    static const struct { int c, word; u16 bit; int idx; } buttons[] = {
+        {UP, 1, D1_UP, 2}, {DOWN, 1, D1_DOWN, 3}, {LEFT, 1, D1_LEFT, 1}, {RIGHT, 1, D1_RIGHT, 0},
+        {CROSS, 2, D2_CROSS, 6}, {CIRCLE, 2, D2_CIRCLE, 5}, {SQUARE, 2, D2_SQUARE, 7}, {TRIANGLE, 2, D2_TRIANGLE, 4},
+        {L1, 2, D2_L1, 8}, {R1, 2, D2_R1, 9}, {L2, 2, D2_L2, 10}, {R2, 2, D2_R2, 11},
+        {L3, 1, D1_L3, -1}, {R3, 1, D1_R3, -1}, {START, 1, D1_START, -1}, {SELECT, 1, D1_SELECT, -1},
     };
-    for (auto& e : press)
-        if ((e.word == 1 ? p.digital1 : p.digital2) & e.bit) p.pressure[e.idx] = 255;
-    if ((p.digital2 & D2_L2) && !p.pressure[10]) p.pressure[10] = 255;
-    if ((p.digital2 & D2_R2) && !p.pressure[11]) p.pressure[11] = 255;
+    const float threshold = g_in.trigger / 100.0f;
+    for (const auto& b : buttons) {
+        const bool analog = gp && is_axis(g_in.pad[b.c]);
+        const float v = std::max(key[b.c], pad[b.c]);
+        const bool on = key[b.c] > 0 || (analog ? pad[b.c] > threshold : pad[b.c] > 0.5f);
+        if (on) (b.word == 1 ? p.digital1 : p.digital2) |= b.bit;
+        if (b.idx >= 0) p.pressure[b.idx] = on ? (u16)std::clamp((int)std::lround(v * 255), 1, 255) : 0;
+    }
+    // sticks: the gamepad's (dead zone; steering with the response curve), else the keys (steering ramped)
+    auto stick = [&](int neg, int pos, int curve) {
+        return inputcfg::shape(pad[pos] - pad[neg], g_in.deadzone, curve);
+    };
+    float lx = stick(LS_LEFT, LS_RIGHT, g_in.curve), ly = stick(LS_UP, LS_DOWN, 100);
+    float rx = stick(RS_LEFT, RS_RIGHT, 100), ry = stick(RS_UP, RS_DOWN, 100);
+    {   // keyboard steering: towards full lock in steer_ms, back to the centre in centre_ms
+        static float kb_steer = 0;
+        static Uint64 last = SDL_GetTicks();
+        const Uint64 now = SDL_GetTicks();
+        const float dt = (now - last) / 1000.0f, target = key[LS_RIGHT] - key[LS_LEFT];
+        last = now;
+        const int ms = target != 0 && (kb_steer == 0 || (target > 0) == (kb_steer > 0)) ? g_in.steer_ms : g_in.centre_ms;
+        const float step = ms > 0 ? dt * 1000.0f / ms : 2.0f;
+        kb_steer = kb_steer < target ? std::min(kb_steer + step, target) : std::max(kb_steer - step, target);
+        if (lx == 0) lx = kb_steer;
+    }
+    if (ly == 0) ly = key[LS_DOWN] - key[LS_UP];
+    if (rx == 0) rx = key[RS_RIGHT] - key[RS_LEFT];
+    if (ry == 0) ry = key[RS_DOWN] - key[RS_UP];
+    if (g_in.invert_look) ry = -ry;
+    p.lx = axis8(lx);
+    p.ly = axis8(ly);
+    p.rx = axis8(rx);
+    p.ry = axis8(ry);
+    // TV camera tuning keys (hle_camera.cpp) and F8 (hle_aidrive.cpp): host::debug_keys
+    u32 dk = 0;
+    for (int c = TUNE_UP; c <= AI_TOGGLE; c++)
+        if (key[c] > 0) dk |= 1u << (c - TUNE_UP);
+    g_debug_keys = dk;
     std::lock_guard lk(g_pad_mutex);
     g_pad = p;
 }
@@ -137,6 +150,7 @@ void ui_thread() {
     }
     g_win_cv.notify_all();
     if (!win) { LOG_E("SDL window creation failed: %s", SDL_GetError()); return; }
+    load_input();
     SDL_Gamepad* gp = nullptr;
     while (!g_quit) {
         SDL_Event e;

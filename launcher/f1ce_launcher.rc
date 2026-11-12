@@ -3,11 +3,10 @@
 // dropper, see the 0.1.1 false positive) and the common-controls / DPI manifest.
 #include <windows.h>
 
+#include "version.h"
+
 #define F1CE_LAUNCHER_ICON 101
 F1CE_LAUNCHER_ICON ICON "f1ce_launcher.ico"
-
-#define F1CE_VERSION       0,1,2,0
-#define F1CE_VERSION_STR   "0.1.2.0"
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION     F1CE_VERSION
