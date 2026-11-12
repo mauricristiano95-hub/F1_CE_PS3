@@ -1,24 +1,30 @@
 // HLE: cellSaveData (List/Auto Save/Load, Delete).
 //
 // The save API is callback driven: the system hands the game a directory list, then the directory
-// status, then asks repeatedly for file operations until the game reports it is done. There is no
-// system UI here: when a choice is required the existing directory (or the game's "new data"
-// directory) is selected automatically.
+// status, then asks repeatedly for file operations until the game reports it is done. Where the PS3
+// shows its save data list (list save / load, delete) the player chooses in an overlay dialog
+// (overlay.h), as on the console and in RPCS3: every profile is a directory (P000, P001, ...), and
+// the game's "new data" item creates another. Without a dialog (F1CE_SAVE_UI=0, headless) the
+// existing directory, or the game's new-data directory, is selected automatically.
 //
 // Storage: ps3_data/dev_hdd0/home/00000001/savedata/<DIRNAME>/ with the game's files plus
 // "_params.bin" holding the system file parameters block the game provides.
 #include "kernel.h"
+#include "overlay.h"
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <vector>
 
 namespace stdfs = std::filesystem;
+extern std::string g_title_id;   // loader.cpp
 
 namespace {
 enum : s32 {
     CBRESULT_OK_LAST_NOCONFIRM = 2, CBRESULT_OK_LAST = 1, CBRESULT_OK_NEXT = 0,
+    RET_CANCEL = 1,   // CELL_SAVEDATA_RET_CANCEL: the player backed out of the list
     ERROR_CBRESULT = (s32)0x8002B401, ERROR_NODATA = (s32)0x8002B410,
 };
 enum : u32 { OP_READ = 0, OP_WRITE = 1, OP_DELETE = 2, OP_WRITE_NOTRUNC = 3 };
@@ -51,8 +57,50 @@ std::vector<std::string> split_prefixes(const std::string& s) {
     return v;
 }
 
-std::vector<std::string> list_dirs(const std::string& prefixes) {
-    std::vector<std::string> out;
+bool read_file(const stdfs::path& p, std::vector<u8>& data) {
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return false;
+    data.assign((std::istreambuf_iterator<char>(f)), {});
+    return true;
+}
+
+// a save directory as the list shows it
+struct DirInfo {
+    std::string name;
+    s64 mtime = 0;              // newest file, seconds since the epoch
+    u64 size = 0;               // bytes
+    std::vector<u8> params;     // _params.bin (the system file parameters), SYSPARAM_SIZE bytes
+};
+
+s64 epoch_seconds(stdfs::file_time_type t) {
+    using namespace std::chrono;
+    return duration_cast<seconds>(t - stdfs::file_time_type::clock::now() + system_clock::now().time_since_epoch()).count();
+}
+
+DirInfo dir_info(const std::string& name) {
+    DirInfo d;
+    d.name = name;
+    const stdfs::path path = save_root() / stdfs::u8path(name);
+    std::error_code ec;
+    for (auto& e : stdfs::directory_iterator(path, ec)) {
+        if (!e.is_regular_file(ec) || e.path().extension() == ".tmp") continue;
+        d.size += e.file_size(ec);
+        d.mtime = std::max(d.mtime, epoch_seconds(e.last_write_time(ec)));
+    }
+    read_file(path / "_params.bin", d.params);
+    d.params.resize(SYSPARAM_SIZE);
+    return d;
+}
+
+std::string param_str(const DirInfo& d, u32 off, u32 len) {   // title 0x000, subtitle 0x080, detail 0x100
+    const char* p = (const char*)d.params.data() + off;
+    return std::string(p, strnlen(p, len));
+}
+
+// the directories matching the prefixes ("A|B"), in the order the game asked for (CellSaveDataSetList sortType:
+// 0 modified time, 1 subtitle; sortOrder: 0 descending, 1 ascending)
+std::vector<DirInfo> list_dirs(const std::string& prefixes, u32 sort_type, u32 sort_order) {
+    std::vector<DirInfo> out;
     std::error_code ec;
     if (!stdfs::is_directory(save_root(), ec)) return out;
     auto pre = split_prefixes(prefixes);
@@ -60,17 +108,31 @@ std::vector<std::string> list_dirs(const std::string& prefixes) {
         if (!e.is_directory()) continue;
         std::string n = PATH_STR(e.path().filename());
         for (auto& p : pre)
-            if (!p.empty() && n.rfind(p, 0) == 0) { out.push_back(n); break; }
+            if (!p.empty() && n.rfind(p, 0) == 0) { out.push_back(dir_info(n)); break; }
     }
-    std::sort(out.begin(), out.end());
+    std::sort(out.begin(), out.end(), [&](const DirInfo& a, const DirInfo& b) {
+        if (sort_type == 1) {
+            const std::string sa = param_str(a, 0x80, 128), sb = param_str(b, 0x80, 128);
+            if (sa != sb) return sort_order == 1 ? sa < sb : sa > sb;
+        } else if (a.mtime != b.mtime) {
+            return sort_order == 1 ? a.mtime < b.mtime : a.mtime > b.mtime;
+        }
+        return a.name < b.name;
+    });
     return out;
 }
 
-bool read_file(const stdfs::path& p, std::vector<u8>& data) {
-    std::ifstream f(p, std::ios::binary);
-    if (!f) return false;
-    data.assign((std::istreambuf_iterator<char>(f)), {});
-    return true;
+overlay::SaveEntry save_entry(const DirInfo& d) {
+    overlay::SaveEntry e;
+    e.dir = d.name;
+    e.title = param_str(d, 0, 128);
+    e.subtitle = param_str(d, 0x80, 128);
+    e.detail = param_str(d, 0x100, 1024);
+    if (e.title.empty()) e.title = d.name;
+    e.mtime = d.mtime;
+    e.size = d.size;
+    read_file(save_root() / stdfs::u8path(d.name) / "ICON0.PNG", e.icon_png);
+    return e;
 }
 
 s32 cb_result(u32 res) { return (s32)ld32(res); }
@@ -196,7 +258,7 @@ s32 run_dir(PPUContext& c, const SaveOp& op, const std::string& dir, bool is_new
     return CELL_OK;
 }
 
-// list phase: hands the matching directories to the game and picks the target directory
+// list phase: hands the matching directories to the game, then the player picks the target directory
 s32 run_list(PPUContext& c, bool save, u32 set_list, u32 set_buf, u32 func_list, u32 func_stat, u32 func_file,
              u32 userdata) {
     std::lock_guard lk(g_save_mutex);
@@ -205,17 +267,15 @@ s32 run_list(PPUContext& c, bool save, u32 set_list, u32 set_buf, u32 func_list,
     u32 res = g_scratch, list_get = g_scratch + 0x40, list_set = g_scratch + 0x100;
     st32(res + 16, userdata);
     std::string prefix = gstr(ld32(set_list + 8));
-    auto dirs = list_dirs(prefix);
+    const auto dirs = list_dirs(prefix, ld32(set_list), ld32(set_list + 4));
     u32 dir_max = ld32(set_buf), buf = ld32(set_buf + 0x24), buf_size = ld32(set_buf + 0x20);
     u32 n = 0;
     for (auto& d : dirs) {
         if (n >= dir_max || (n + 1) * DIRLIST_ENTRY > buf_size) break;
         u32 e = buf + n * DIRLIST_ENTRY;
         memset(gmem(e), 0, DIRLIST_ENTRY);
-        gstr_write(e, d, 32);
-        std::vector<u8> params;
-        if (read_file(save_root() / stdfs::u8path(d) / "_params.bin", params) && params.size() >= SYSPARAM_SIZE)
-            memcpy(gmem(e + 32), params.data() + 0x508, 8);   // listParam of the stored parameters
+        gstr_write(e, d.name, 32);
+        memcpy(gmem(e + 32), d.params.data() + 0x508, 8);   // listParam of the stored parameters
         n++;
     }
     st32(list_get + 0, (u32)dirs.size());
@@ -226,15 +286,66 @@ s32 run_list(PPUContext& c, bool save, u32 set_list, u32 set_buf, u32 func_list,
     LOG_I("savedata: %s list (prefix '%s', %u dirs) -> callback %d", save ? "save" : "load", prefix.c_str(), n, r);
     if (r < 0) return ERROR_CBRESULT;
     if (r == CBRESULT_OK_LAST || r == CBRESULT_OK_LAST_NOCONFIRM) return CELL_OK;
-    // selection: the game's fixed list first, else its new-data directory
+    // CellSaveDataListSet: focusPosition, focusDirName, fixedListNum, fixedList, newData
+    const u32 focus_pos = ld32(list_set), focus_dir = ld32(list_set + 4);
+    const u32 fixed_num = ld32(list_set + 8), fixed = ld32(list_set + 12), new_data = ld32(list_set + 16);
+    auto find = [&](const std::string& name) {
+        return std::find_if(dirs.begin(), dirs.end(), [&](const DirInfo& d) { return d.name == name; });
+    };
+    // what the list shows: the game's fixed list (else every directory), and the new data item when saving
+    std::vector<overlay::SaveEntry> entries;
+    if (fixed_num && fixed) {
+        for (u32 i = 0; i < fixed_num; i++)
+            if (auto it = find(gstr(fixed + i * DIRLIST_ENTRY, 32)); it != dirs.end()) entries.push_back(save_entry(*it));
+    } else {
+        for (auto& d : dirs) entries.push_back(save_entry(d));
+    }
+    const std::string nd = save && new_data && ld32(new_data + 4) ? gstr(ld32(new_data + 4), 32) : "";
+    if (!nd.empty() && find(nd) == dirs.end()) {
+        // CellSaveDataListNewData: iconPosition (0 head, 1 tail), dirName, icon (title, iconBufSize, iconBuf: a PNG)
+        overlay::SaveEntry e;
+        e.dir = nd;
+        e.is_new = true;
+        e.title = "New Saved Data";
+        if (u32 icon = ld32(new_data + 8)) {
+            if (u32 t = ld32(icon); t && !gstr(t, 128).empty()) e.title = gstr(t, 128);
+            const u32 size = ld32(icon + 4), png = ld32(icon + 8);
+            if (size && png) e.icon_png.assign(gmem(png), gmem(png) + size);
+        }
+        if (ld32(new_data) == 0) entries.insert(entries.begin(), std::move(e));
+        else entries.push_back(std::move(e));
+    }
+    if (entries.empty()) {
+        if (overlay::message("There is no saved data.")) return RET_CANCEL;
+        return save ? ERROR_CBRESULT : ERROR_NODATA;
+    }
+    // the focused item (focusPosition: 0 focusDirName, 1 list head, 2 list tail, 3 latest, 4 oldest, 5 new data)
+    int focus = 0;
+    for (int i = 0; i < (int)entries.size(); i++) {
+        const overlay::SaveEntry& e = entries[i];
+        const bool take = focus_pos == 0 ? focus_dir && e.dir == gstr(focus_dir, 32)
+                        : focus_pos == 2 ? true
+                        : focus_pos == 3 ? !e.is_new && (entries[focus].is_new || e.mtime > entries[focus].mtime)
+                        : focus_pos == 4 ? !e.is_new && (entries[focus].is_new || e.mtime < entries[focus].mtime)
+                        : focus_pos == 5 ? e.is_new
+                                         : false;
+        if (take) focus = i;
+    }
     std::string dir;
     bool is_new = false;
-    u32 fixed_num = ld32(list_set + 8), fixed = ld32(list_set + 12), new_data = ld32(list_set + 16);
-    if (fixed_num && fixed) dir = gstr(fixed, 32);
-    else if (n) dir = gstr(buf, 32);
-    if (save && new_data && ld32(new_data + 4) && (dir.empty() || !fixed_num)) {
-        std::string nd = gstr(ld32(new_data + 4), 32);
-        if (std::find(dirs.begin(), dirs.end(), nd) == dirs.end()) { dir = nd; is_new = true; }
+    const int pick = overlay::save_list(save ? overlay::SaveMode::Save : overlay::SaveMode::Load, entries, focus);
+    if (pick == -1) {
+        LOG_I("savedata: %s list cancelled by the player", save ? "save" : "load");
+        return RET_CANCEL;
+    }
+    if (pick >= 0) {
+        dir = entries[pick].dir;
+        is_new = entries[pick].is_new;
+        LOG_I("savedata: the player chose '%s'%s", dir.c_str(), is_new ? " (new)" : "");
+    } else {   // no dialog: the game's fixed list first, else the first directory, else its new-data directory
+        if (fixed_num && fixed) dir = gstr(fixed, 32);
+        else if (n) dir = gstr(buf, 32);
+        if (!nd.empty() && (dir.empty() || !fixed_num) && find(nd) == dirs.end()) { dir = nd; is_new = true; }
     }
     if (dir.empty()) return save ? ERROR_CBRESULT : ERROR_NODATA;
     return run_dir(c, {save, set_buf, func_stat, func_file, userdata}, dir, is_new);
@@ -248,11 +359,32 @@ s32 run_auto(PPUContext& c, bool save, const std::string& dir, u32 set_buf, u32 
     LOG_I("savedata: auto %s '%s' (%s)", save ? "save" : "load", dir.c_str(), exists ? "exists" : "new");
     return run_dir(c, {save, set_buf, func_stat, func_file, userdata}, dir, !exists);
 }
+
+// cellSaveDataDelete: the system's list of all the title's save data; the chosen directory is deleted
+s32 run_delete() {
+    std::lock_guard lk(g_save_mutex);
+    const auto dirs = list_dirs(g_title_id, 0, 0);   // (newest first)
+    std::vector<overlay::SaveEntry> entries;
+    for (auto& d : dirs) entries.push_back(save_entry(d));
+    if (entries.empty()) return overlay::message("There is no saved data.") ? RET_CANCEL : CELL_OK;
+    const int pick = overlay::save_list(overlay::SaveMode::Delete, entries, 0);
+    if (pick == overlay::UNAVAILABLE) {
+        LOG_W("savedata: delete needs the save data dialog; nothing deleted");
+        return CELL_OK;
+    }
+    if (pick < 0) return RET_CANCEL;
+    std::error_code ec;
+    stdfs::remove_all(save_root() / stdfs::u8path(entries[pick].dir), ec);
+    if (ec) LOG_E("savedata: cannot delete '%s': %s", entries[pick].dir.c_str(), ec.message().c_str());
+    else LOG_I("savedata: deleted '%s'", entries[pick].dir.c_str());
+    return CELL_OK;
+}
 }  // namespace
 
 namespace {
 s32 logged(const char* what, s32 r) {
-    if (r != CELL_OK) LOG_W("savedata: %s -> %08x", what, (u32)r);
+    if (r == RET_CANCEL) LOG_I("savedata: %s -> cancelled", what);
+    else if (r != CELL_OK) LOG_W("savedata: %s -> %08x", what, (u32)r);
     else LOG_I("savedata: %s -> ok", what);
     return r;
 }
@@ -272,8 +404,7 @@ HLE_FUNC(cellSaveDataAutoSave) {
 HLE_FUNC(cellSaveDataAutoLoad) {
     RET(logged("auto load", run_auto(c, false, gstr((u32)ARG(1), 32), (u32)ARG(3), (u32)ARG(4), (u32)ARG(5), (u32)ARG(7))));
 }
-// cellSaveDataDelete(container): would show the system deletion UI; nothing to do without UI
+// cellSaveDataDelete(container): the system's deletion list
 HLE_FUNC(cellSaveDataDelete) {
-    LOG_W("savedata: delete (system UI) requested, nothing deleted");
-    RET(CELL_OK);
+    RET(logged("delete", run_delete()));
 }

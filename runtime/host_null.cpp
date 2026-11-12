@@ -1,6 +1,7 @@
 // Headless host backend: no window, no audio, neutral pad. Used for bring-up and CI.
 #include "host.h"
 #include "kernel.h"
+#include "overlay.h"
 
 namespace host {
 void init() { LOG_I("host: headless backend"); }
@@ -31,3 +32,11 @@ void gl_drawable_size(int* w, int* h) { *w = *h = 0; }
 bool dump_frame_due() { return false; }
 void dump_frame(const u32*, u32, u32) {}
 }  // namespace host
+
+// no window: no system dialogs (the save data HLE then picks by itself)
+namespace overlay {
+bool frame(u32, u32, Image*) { return false; }
+bool input_captured() { return false; }
+int save_list(SaveMode, const std::vector<SaveEntry>&, int) { return UNAVAILABLE; }
+bool message(const std::string&) { return false; }
+}  // namespace overlay

@@ -21,6 +21,7 @@
 #endif
 #include "host.h"
 #include "kernel.h"
+#include "overlay.h"
 #include "rsx.h"
 #include "rsx_common.h"
 
@@ -2127,6 +2128,87 @@ void present_blit(Surface* s, u32 index) {
     image_barrier(g_cb, g_swap_img[index], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 }
 
+// System dialogs (overlay.h) blended over the swapchain image, pixel for pixel (after present_pass / present_blit)
+VkPipeline g_overlay_pipe = 0;
+Img* g_overlay_img = nullptr;
+void overlay_pass(u32 index) {
+    overlay::Image im;
+    if (!overlay::frame(g_swap_ext.width, g_swap_ext.height, &im)) return;
+    static u64 serial = 0;
+    if (!g_overlay_pipe) {
+        const std::string vs =
+            "#version 450 core\nvoid main() { vec2 p = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2); gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }\n";
+        const std::string fs =
+            "#version 450 core\n#extension GL_EXT_nonuniform_qualifier : require\n"
+            "layout(set = 1, binding = 0) uniform sampler2D g_tex[];\n"
+            "layout(push_constant) uniform PC { vec4 u_p; vec4 u_win; int u_slot; };\n"
+            "layout(location = 0) out vec4 o;\n"
+            "void main() { o = texelFetch(g_tex[u_slot], ivec2(gl_FragCoord.xy), 0); }\n";
+        g_overlay_pipe = make_pipeline(shader_module(0, vs), shader_module(1, fs), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, g_swap_fmt.format, VK_FORMAT_UNDEFINED);
+        if (!g_overlay_pipe) { LOG_E("rsx: overlay pipeline failed"); return; }
+    }
+    if (!g_overlay_img || g_overlay_img->w != im.w || g_overlay_img->h != im.h) {
+        if (g_overlay_img) destroy_image(g_overlay_img);
+        g_overlay_img = make_image(im.w, im.h, 1, COLOR_FMT, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        serial = 0;
+    }
+    if (im.serial != serial) {
+        const u32 bytes = im.w * im.h * 4;
+        VkBuffer buf;
+        ptrdiff_t soff;
+        memcpy(staging(bytes, &buf, &soff), im.px, bytes);
+        VkBufferImageCopy c{};
+        c.bufferOffset = (VkDeviceSize)soff;
+        c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        c.imageExtent = {im.w, im.h, 1};
+        vkCmdCopyBufferToImage(g_ucb, buf, g_overlay_img->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+        serial = im.serial;
+    }
+    const u32 slot = tex_slot(g_overlay_img, 0);
+    image_barrier(g_cb, g_swap_img[index], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo ca{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    ca.imageView = g_swap_view[index];
+    ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    ca.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+    ri.renderArea = {{0, 0}, g_swap_ext};
+    ri.layerCount = 1;
+    ri.colorAttachmentCount = 1;
+    ri.pColorAttachments = &ca;
+    vkCmdBeginRendering(g_cb, &ri);
+    VkViewport vp{0, 0, (float)g_swap_ext.width, (float)g_swap_ext.height, 0, 1};
+    VkRect2D sc{{0, 0}, g_swap_ext};
+    vkCmdSetViewportWithCount(g_cb, 1, &vp);
+    vkCmdSetScissorWithCount(g_cb, 1, &sc);
+    vkCmdSetCullMode(g_cb, VK_CULL_MODE_NONE);
+    vkCmdSetFrontFace(g_cb, VK_FRONT_FACE_CLOCKWISE);
+    vkCmdSetPrimitiveTopology(g_cb, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    vkCmdSetPrimitiveRestartEnable(g_cb, VK_FALSE);
+    vkCmdSetDepthTestEnable(g_cb, VK_FALSE);
+    vkCmdSetDepthWriteEnable(g_cb, VK_FALSE);
+    vkCmdSetDepthCompareOp(g_cb, VK_COMPARE_OP_ALWAYS);
+    const float bc[4] = {};
+    vkCmdSetBlendConstants(g_cb, bc);
+    VkBool32 on = VK_TRUE;
+    vkCmdSetColorBlendEnableEXT(g_cb, 0, 1, &on);
+    VkColorBlendEquationEXT e{VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK_BLEND_OP_ADD,
+                              VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK_BLEND_OP_ADD};
+    vkCmdSetColorBlendEquationEXT(g_cb, 0, 1, &e);
+    VkColorComponentFlags m = 0xF;
+    vkCmdSetColorWriteMaskEXT(g_cb, 0, 1, &m);
+    vkCmdSetAlphaToCoverageEnableEXT(g_cb, VK_FALSE);
+    vkCmdSetRasterizationSamplesEXT(g_cb, VK_SAMPLE_COUNT_1_BIT);
+    vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_overlay_pipe);
+    struct { float p[4], win[4]; int slot; } pc = {{}, {}, (int)slot};
+    vkCmdPushConstants(g_cb, g_pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
+    vkCmdDraw(g_cb, 3, 1, 0, 0);
+    vkCmdEndRendering(g_cb);
+    g_dyn.valid = false;
+    g_dyn.pipe = 0;
+    image_barrier(g_cb, g_swap_img[index], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+}
+
 // ------------------------------------------------------------------ set-up
 void create_device() {
     auto get = (PFN_vkGetInstanceProcAddr)host::vk_begin();
@@ -2635,6 +2717,7 @@ void flip(u32 ea, u32 pitch, u32 width, u32 height) {
         tp[1] = time_usec();
         if (shown && (res_scaled() || fxaa_on())) present_pass(*shown, index);
         else present_blit(shown, index);
+        overlay_pass(index);
         submit(sem, g_swap_done[index]);
         tp[2] = time_usec();
         present(index);

@@ -82,6 +82,23 @@ set(RUNTIME_SOURCES
 )
 if(F1CE_HOST STREQUAL "SDL")
   list(APPEND RUNTIME_SOURCES runtime/host_sdl.cpp runtime/wheel_sdl.cpp runtime/rsx.cpp runtime/rsx_common.cpp runtime/rsx_gl.cpp)
+  # system dialogs over the game (runtime/overlay.cpp): Dear ImGui layout, the launcher's fonts built in
+  set(OVERLAY_GEN ${CMAKE_CURRENT_BINARY_DIR}/overlay_gen)
+  foreach(embed font_black_italic|third_party/exo2/Exo2-BlackItalic.ttf
+                font_semibold_italic|third_party/exo2/Exo2-SemiBoldItalic.ttf
+                font_medium|third_party/exo2/Exo2-Medium.ttf)
+    string(REPLACE "|" ";" embed ${embed})
+    list(GET embed 0 name)
+    list(GET embed 1 src)
+    add_custom_command(OUTPUT ${OVERLAY_GEN}/${name}.h
+      COMMAND ${CMAKE_COMMAND} -DIN=${CMAKE_CURRENT_SOURCE_DIR}/${src} -DOUT=${OVERLAY_GEN}/${name}.h -DNAME=${name}
+              -P ${CMAKE_CURRENT_SOURCE_DIR}/launcher/embed.cmake
+      DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${src} ${CMAKE_CURRENT_SOURCE_DIR}/launcher/embed.cmake)
+    list(APPEND RUNTIME_SOURCES ${OVERLAY_GEN}/${name}.h)
+  endforeach()
+  set(OVERLAY_IMGUI third_party/imgui-1.93.0)
+  list(APPEND RUNTIME_SOURCES runtime/overlay.cpp ${OVERLAY_IMGUI}/imgui.cpp ${OVERLAY_IMGUI}/imgui_draw.cpp
+    ${OVERLAY_IMGUI}/imgui_tables.cpp ${OVERLAY_IMGUI}/imgui_widgets.cpp)
   set(SDL_SHARED OFF CACHE BOOL "" FORCE)
   set(SDL_STATIC ON CACHE BOOL "" FORCE)
   set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
@@ -142,6 +159,7 @@ endif()
 
 if(F1CE_HOST STREQUAL "SDL")
   target_link_libraries(f1ce PRIVATE SDL3::SDL3-static)
+  target_include_directories(f1ce PRIVATE ${OVERLAY_GEN} ${OVERLAY_IMGUI})
   if(F1CE_VULKAN)
     target_compile_definitions(f1ce PRIVATE F1CE_VULKAN)
     target_link_libraries(f1ce PRIVATE glslang::glslang glslang::SPIRV glslang::glslang-default-resource-limits)

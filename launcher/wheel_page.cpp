@@ -287,7 +287,7 @@ void draw_live(float w) {
         }
 }
 
-// a pedal's live bar over the last row (between its label and value): travel, min and max marks, what the game gets
+// a pedal's live bar over its axis row (between its label and value): travel, min and max marks, what the game gets
 void pedal_bar(int p, bool focused) {
     using namespace ui;
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -505,15 +505,8 @@ int rows() {
         for (int m = 0; m < 2; m++) {
             int& v = m ? p.max : p.min;
             const int lo = m ? p.min + wheelcfg::PEDAL_MIN_SPAN : 0, hi = m ? 100 : p.max - wheelcfg::PEDAL_MIN_SPAN;
-            focused = false;
-            ImGui::PushID(g_index);
-            r = ui::row_widget("r", m ? "Max" : "Min", std::to_string(v) + "%", g_index++, true, false, range_help, &focused);
-            ImGui::PopID();
-            pedal_bar(i, focused);
-            if (r.delta) {
-                v = std::clamp(v + r.delta, lo, hi);
-                g_fresh = false;
-            }
+            r = row(m ? "Max" : "Min", std::to_string(v) + "%", true, range_help);
+            if (r.delta) v = std::clamp(v + r.delta, lo, hi);
         }
     }
 

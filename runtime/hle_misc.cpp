@@ -2,6 +2,7 @@
 #include "host.h"
 #include "kernel.h"
 #include "lv2_fs.h"
+#include "overlay.h"
 #include "rsx.h"
 
 #include <algorithm>
@@ -31,6 +32,7 @@ HLE_FUNC(cellPadGetData) {
     u32 port = (u32)ARG(0), p = (u32)ARG(1);
     if (port != 0) { st32(p, 0); RET(CELL_OK); }
     host::PadState s = host::pad_state();
+    if (overlay::input_captured()) s = {};   // a system dialog (overlay.h) has the pad
     quick_race_overrides(s.digital1, s.lx, s.ly);
     rumble_update();
     st32(p, 24);

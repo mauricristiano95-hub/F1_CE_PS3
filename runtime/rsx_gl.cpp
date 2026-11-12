@@ -12,6 +12,7 @@
 #endif
 #include "host.h"
 #include "kernel.h"
+#include "overlay.h"
 #include "rsx.h"
 #include "rsx_common.h"
 
@@ -2656,6 +2657,61 @@ bool present_pass(Surface& s, GLint ww, GLint wh) {
     return true;
 }
 
+// System dialogs (overlay.h) blended over the presented window, pixel for pixel
+void overlay_pass(GLint ww, GLint wh) {
+    overlay::Image im;
+    if (!overlay::frame((u32)ww, (u32)wh, &im)) return;
+    static GLuint prog = 0, tex = 0;
+    static GLint loc_h = -1;
+    static u64 serial = 0;
+    if (!prog) {
+        const std::string vs =
+            "#version 330 core\n"
+            "void main() { vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2); gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }\n";
+        const std::string fs =
+            "#version 330 core\n"
+            "uniform sampler2D u_tex;\n"
+            "uniform vec4 u_h;   // x = image height (its rows run top-down)\n"
+            "out vec4 o;\n"
+            "void main() { o = texelFetch(u_tex, ivec2(gl_FragCoord.x, u_h.x - gl_FragCoord.y), 0); }\n";
+        GLuint v = compile(GL_VERTEX_SHADER, vs), f = compile(GL_FRAGMENT_SHADER, fs);
+        prog = glCreateProgram();
+        glAttachShader(prog, v);
+        glAttachShader(prog, f);
+        glLinkProgram(prog);
+        glDeleteShader(v);
+        glDeleteShader(f);
+        glUseProgram(prog);
+        glUniform1i(glGetUniformLocation(prog, "u_tex"), 0);
+        loc_h = glGetUniformLocation(prog, "u_h");
+        glGenTextures(1, &tex);
+    }
+    active_unit(0);
+    bind_tex2d(tex);
+    if (im.serial != serial) {
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)im.w, (GLsizei)im.h, 0, GL_RGBA, GL_UNSIGNED_BYTE, im.px);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        serial = im.serial;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDisable(GL_SCISSOR_TEST); glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glEnable(GL_BLEND);
+    glBlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+    srgb_write(false);
+    glViewport(0, 0, ww, wh);
+    glUseProgram(prog);
+    glUniform4f(loc_h, (float)im.h - 0.5f, 0, 0, 0);
+    glBindVertexArray(g_vao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glDisable(GL_BLEND);
+    g_tgt_valid = g_state_valid = false;
+    g_cur_prog = prog;
+}
+
 u64 frame_number() { return g_frame; }
 bool report(u32 type, u32 ea) {
     if (type != 1 || !gl_ok) return false;   // CELL_GCM_ZPASS_PIXEL_CNT
@@ -2814,6 +2870,7 @@ void flip(u32 ea, u32 pitch, u32 width, u32 height) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0); g_tgt_valid = false;
     }
     auto it = g_surfaces.find(offset);
+    bool overlay_drawn = false;   // (before the window dump, so that it shows the dialogs)
     if (it != g_surfaces.end()) {
         Surface& s = it->second;
         // the vertex shader already maps RSX top-left window coords to GL (top row = top of image)
@@ -2833,6 +2890,8 @@ void flip(u32 ea, u32 pitch, u32 width, u32 height) {
             }
             glBlitFramebuffer(0, 0, (GLint)pw, (GLint)ph, rx, ry, rx + rw, ry + rh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
         }
+        overlay_pass(ww, wh);
+        overlay_drawn = true;
         {   // debug: F1CE_DUMP_WINDOW=<n> saves the window (after presentation) every n-th frame as frame_w_<frame>_WxH.argb
             static const int dw = getenv("F1CE_DUMP_WINDOW") ? atoi(getenv("F1CE_DUMP_WINDOW")) : 0;
             if (dw > 0 && g_frame % (u64)dw == 0) {
@@ -2857,6 +2916,7 @@ void flip(u32 ea, u32 pitch, u32 width, u32 height) {
         }
         glBindFramebuffer(GL_FRAMEBUFFER, 0); g_tgt_valid = false;
     }
+    if (!overlay_drawn) overlay_pass(ww, wh);
     zpass_resolve();
     for (auto& [k, sf] : g_surfaces)   // main-memory render targets: finish last frame's readback, start this one
         if (sf.main_ea) { write_back_pending(&sf); write_back_start(&sf); }

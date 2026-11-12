@@ -234,6 +234,7 @@ are kept on a Deck too.
 | `F1CE_AI_DRIVE=key` or `<s>`, F8 | the AI drives the player's car, as after a black flag (the game's own debug cheat `toggle_ai_control`; `runtime/hle_aidrive.cpp`, notes in `MODDING_IDEAS.md`). While the variable is set, F8 toggles AI control during a race, either way. `key`: F8 only; a number s: also hands the car over s seconds after the player first drives in each race (0 = at once) and logs `ai drive:` lines with the car's speed every 2 s. Launcher: Developer Tools, `F1CE_AI_DRIVE` (Off / F8 toggles AI driving / AI from the start). Scripted input can press it (`F1CE_INPUT="60:f8"`) |
 | `F1CE_LUA_PRINT=1`, `F1CE_LUA_LOG=1`, `F1CE_LUA_PATCH=<file>` | front-end Lua (`runtime/hle_frontend.cpp`): log the scripts' `print` output (a stub in the retail game), log every script load, run a Lua file instead of the built-in patch after each script the loader runs |
 | `F1CE_SKIP_INTRO=1`, `F1CE_LANGUAGE=<name>` | starts at the "Press Start" screen: no language menu, no Studio Liverpool / SCE logos, no intro movie (`runtime/hle_boot.cpp`; launcher: General tab). The language is `english` (default), `french`, `german`, `italian`, `spanish`, `portuguese` or `finnish`; without the skip it is only the one the language menu starts on |
+| `F1CE_SAVE_UI=0` | no save data dialog: list save/load pick the first directory (or the game's new-data one) by themselves, delete does nothing (the behaviour before 2026-11-12; headless builds always work this way) |
 | `F1CE_QR_POKE=<offset>:<hex>` | experiment: writes a word into the Quick Race settings object until the race (+0x08 and +0x18 showed no effect in single runs, +0x10 = 4 crashes; an early "+0x08 changes the grid size" came from parallel runs taking another menu path) |
 | `F1CE_TICK_DUMP=<s>,<ea hex>,<size hex>[,<ea>,<size>...]` | with `F1CE_60FPS`: <s> seconds into the first 3D scene, saves that guest memory on 32 (`F1CE_TICK_DUMP_FRAMES`) consecutive frames (`tick_<k>.bin`, further ranges `tick_<k>_<ea>.bin`), to find values that swing from tick to tick; keep it small (large dumps slow frames to 2 ticks) |
 | `F1CE_PHYS_PROBE=<s>[,<ea>]`, `F1CE_PHYS_LOG=<s>,<ea>[,all]` | car physics probes (`runtime/hle_physics.cpp`, `PROBES` in `tools/recomp.py`): the wheel-spin update and slip solve of the car whose +0x910 is <ea>, or calls of the tyre function 0x11c150 |
@@ -342,6 +343,7 @@ are kept on a Deck too.
 - [x] Heavy rain at ~25 fps (untranslated SPU job, fixed 2026-11-03: ~38 fps on the grid)
 - [x] OpenGL crash (guest memory fault) after a cold shader compile (fixed 2026-11-04)
 - [ ] Save data beyond profiles (`cellSaveData*` callbacks for progress): deferred
+- [x] Several profiles: the PS3 save data list (load / create / overwrite / delete) as an overlay dialog (2026-11-12)
 - [ ] First run on Linux and on a Steam Deck
 - [x] Screen rain drops (smoothed by `F1CE_RAIN_SMOOTH`) and the suspension arms: the user judged both faithful to the
       original on 2026-11-04 (RPCS3 is brighter overall)
@@ -1473,3 +1475,23 @@ into the launcher). Findings: the send path's byte-0 overwrite (0x558160), the f
 controller action tables (+0x44: one button index space in PS3 pad order), a destroyed DirectInput effect created
 again at once does not play on the TX (update effects in place). Not tested: real pedals and buttons pressed by hand,
 other vendors, unplugging during a race, Linux.
+
+**2026-11-12** – several profiles (save data list dialog). The game already keeps one directory per profile
+(`BCES00005455146632P000`, `P001`, ...) and asks the PS3's own save data list to choose one: Manage Profiles -> Load
+(`cellSaveDataListLoad`), Create (`cellSaveDataListSave` with a "new data" item, the game's "New profile save" title and
+icon), Delete (`cellSaveDataDelete`, every save of the title). The HLE used to pick the first directory itself, so a
+second profile could never be loaded and a new one never made. Now `runtime/overlay.cpp` shows that list over the game,
+as on the console and in RPCS3: icon, title, subtitle, detail, date and size per entry, sorted as the game asks
+(`CellSaveDataSetList`), its fixed list and focus position honoured; Save asks before overwriting an existing entry,
+Delete asks before deleting (default "No"), Circle cancels (`CELL_SAVEDATA_RET_CANCEL`). Pad, keyboard (arrows, Z/X,
+Enter) and wheel buttons drive it; the game reads a released pad while it is up and until its buttons are let go.
+- Drawing: laid out with Dear ImGui's draw lists (the launcher's Exo 2 fonts, built in) and rasterised on the CPU into a
+  window-sized premultiplied image (1/16 px fixed point, so shared triangle edges are not blended twice), redrawn only
+  when the draw data changes; OpenGL (`overlay_pass`, before the `F1CE_DUMP_WINDOW` capture) and Vulkan
+  (`overlay_pass` after the presentation pass) only upload and blend it.
+- The save threads wait for the answer; when nothing is presented (headless, no GL) or `F1CE_SAVE_UI=0`, the old
+  automatic choice is kept. Log lines: `overlay: dialog N open/answered`, `overlay: input ...`, `savedata: the player
+  chose ...`, `savedata: deleted ...`.
+- Checked by scripted runs from Manage Profiles with two profiles: load P001, create P002, overwrite question,
+  delete P000, cancel; OpenGL and Vulkan. Not yet tried by the user, nor the in-game saves (race weekend, season,
+  career, ghosts), which use the same list.
