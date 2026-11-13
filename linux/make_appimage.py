@@ -230,6 +230,7 @@ def main():
     ap.add_argument("--programs", default=os.path.join(top, "build-win", "shader_cache", "programs.bin"),
                     help="program database to include (missing: none)")
     ap.add_argument("--no-programs", action="store_true", help="leave the program database out")
+    ap.add_argument("--tvcam", help="tvcam_tune.ini to ship (AppRun copies it to the data folder if none is there)")
     ap.add_argument("--icon", default=os.path.join(os.path.dirname(top), "icon.png"))
     ap.add_argument("--runtime", help="AppImage type 2 runtime to use instead of the downloaded one")
     ap.add_argument("--no-strip", action="store_true", help="keep the debug information (gdb backtraces)")
@@ -264,6 +265,9 @@ def main():
     if not args.no_programs and os.path.isfile(args.programs):
         add(root, "usr/share/f1ce-recomp/programs.bin", open(args.programs, "rb").read(), 0o644)
         print(f"program database: {args.programs}")
+    if args.tvcam:
+        add(root, "usr/share/f1ce-recomp/tvcam_tune.ini", open(args.tvcam, "rb").read(), 0o644)
+        print(f"tv camera settings: {args.tvcam}")
     mtime = int(os.environ.get("SOURCE_DATE_EPOCH", time.time()))
 
     t = time.time()

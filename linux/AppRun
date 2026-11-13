@@ -207,6 +207,9 @@ export F1CE_CACHE_DIR="$CACHE_DIR/shader_cache"
 # during play; later runs add the programs they meet to the copy in the cache
 seed="$HERE/usr/share/f1ce-recomp/programs.bin"
 [ -f "$seed" ] && [ ! -f "$F1CE_CACHE_DIR/programs.bin" ] && cp "$seed" "$F1CE_CACHE_DIR/programs.bin"
+# onboard TV camera settings shipped with a build (make_appimage.py --tvcam); the player's own file is kept
+tv="$HERE/usr/share/f1ce-recomp/tvcam_tune.ini"
+[ -f "$tv" ] && [ ! -f "$DATA_DIR/tvcam_tune.ini" ] && cp "$tv" "$DATA_DIR/tvcam_tune.ini"
 # gamescope (Steam Deck game mode) runs games through XWayland
 [ "$gamescope" = 1 ] && [ -z "$SDL_VIDEO_DRIVER" ] && export SDL_VIDEO_DRIVER=x11
 
