@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include "../runtime/self_decrypt.h"
 #include "wheel_tab.h"
 
 namespace {
@@ -518,11 +519,14 @@ void start_game() {
         MessageBoxW(g_main, L"This folder does not look like the game's PS3_GAME folder.", L"F1 CE", MB_ICONWARNING);
         return;
     }
-    if (!is_file(game + L"\\USRDIR\\EBOOT.elf")) {
-        MessageBoxW(g_main, L"USRDIR\\EBOOT.elf was not found in this PS3_GAME folder.\n\n"
-                    L"The game needs the decrypted executable (EBOOT.elf) next to EBOOT.BIN; "
-                    L"the encrypted EBOOT.BIN alone does not work.", L"F1 CE", MB_ICONWARNING);
-        return;
+    {   // the game decrypts the disc's EBOOT.BIN itself: the same check, before it starts
+        std::vector<uint8_t> elf;
+        if (const std::string e = eboot::load(std::filesystem::path(game), elf); !e.empty()) {
+            std::wstring msg(MultiByteToWideChar(CP_UTF8, 0, e.c_str(), (int)e.size(), nullptr, 0), L'\0');
+            MultiByteToWideChar(CP_UTF8, 0, e.c_str(), (int)e.size(), msg.data(), (int)msg.size());
+            MessageBoxW(g_main, msg.c_str(), L"F1 CE", MB_ICONWARNING);
+            return;
+        }
     }
     save_settings();
     set_gpu_preference(exe);

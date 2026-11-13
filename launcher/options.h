@@ -32,9 +32,12 @@ struct Option {
 std::vector<Option>& all();
 Option* find(const char* key);
 
-// at start: the launcher's folder (log, saves and the ini live there), the season packs and GPUs found
+// at start: the launcher's folder (the game's executable is there), the season packs and GPUs found
 void init(const std::string& exe_dir);
 const std::string& exe_dir();
+// where the ini, saves, log, MODS and wheel profiles live and the game runs: F1CE_DATA_DIR (set by the Linux
+// AppImage, which is read-only), else the launcher's folder
+const std::string& data_dir();
 std::string ini_path();
 void load(const Ini& ini);
 // Developer Tools: shown, and their options passed to the game, only with F1CE_DEV_MODE=1 ([game] of the ini, or
@@ -46,7 +49,7 @@ void save(Ini& ini);
 void changed(Option& o, Ini& ini);
 
 std::string& game_path();
-std::string game_path_problem();   // empty: the folder looks like PS3_GAME with the decrypted EBOOT.elf
+std::string game_path_problem();   // empty: a PS3_GAME folder whose executable decrypts and is the right one
 std::string gpu_summary();         // "Vulkan · AMD Radeon RX 6600"
 
 // starts the game with the options; returns an error message, or empty when it runs (exited: from another thread)

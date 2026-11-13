@@ -672,6 +672,13 @@ void load_profile(int i) {
     });
     c.device = g_cfg.device;   // (a profile is the settings, not the choice of wheel)
     c.enabled = g_cfg.enabled;
+    c.pedals_device = g_cfg.pedals_device;
+    if (g_cfg.pedals_separate) {   // (a separate pedal set keeps its own calibration)
+        c.pedals_separate = true;
+        c.throttle = g_cfg.throttle;
+        c.brake = g_cfg.brake;
+        c.clutch = g_cfg.clutch;
+    }
     g_cfg = c;
     write_controls();
     SetWindowTextW(g_profile, pr.name.c_str());
@@ -713,7 +720,7 @@ void save_profile() {
         WritePrivateProfileStringW(L"profile", L"notes", (notes + L".").c_str(), file.c_str());
     }
     wheelcfg::save(g_cfg, [&](const char* k, const std::string& v) {
-        if (!strcmp(k, "device") || !strcmp(k, "enabled")) return;
+        if (!strcmp(k, "device") || !strcmp(k, "enabled") || !strcmp(k, "pedals_device")) return;
         WritePrivateProfileStringW(L"wheel", widen(k).c_str(), widen(v).c_str(), file.c_str());
     });
     g_fresh = false;

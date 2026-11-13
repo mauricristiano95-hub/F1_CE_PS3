@@ -676,8 +676,9 @@ void frame() {
         std::string help = g_help.empty() && g_help_hover ? g_help_hover : g_help;
         float y = hy + 22 * S;
         if (const std::string problem = opts::game_path_problem(); !problem.empty()) {
-            text(dl, F.xbold, 14, ImVec2(rx + 18 * S, y), RED, "GAME FOLDER: " + problem, rw - 36 * S);
-            y += 20 * S;
+            const std::string line = "GAME FOLDER: " + problem;
+            text(dl, F.xbold, 14, ImVec2(rx + 18 * S, y), RED, line, rw - 36 * S);
+            y += F.xbold->CalcTextSizeA(14 * S, FLT_MAX, rw - 36 * S, line.c_str()).y + 4 * S;   // (wraps)
         }
         text(dl, F.medium, 14, ImVec2(rx + 18 * S, y), HELP, help, rw - 36 * S);
     }
@@ -732,7 +733,7 @@ void frame() {
             prompt(dl, A_FOLDER, ImVec2(px, cy));
             text(dl, F.xbold, 16, ImVec2(px + pw + 10 * S, cy - 10 * S), WHITE, "CHANGE");
             text(dl, F.xbold, 11, ImVec2(bx0 + 16 * S, cy - 19 * S), problem.empty() ? IM_COL32(158, 158, 158, 255) : RED,
-                 problem.empty() ? "GAME FOLDER (PS3_GAME)" : "GAME FOLDER (PS3_GAME): NOT FOUND");
+                 problem.empty() ? "GAME FOLDER (PS3_GAME)" : "GAME FOLDER (PS3_GAME): NOT USABLE");
             dl->PushClipRect(ImVec2(bx0, cy - 26 * S), ImVec2(px - 10 * S, cy + 26 * S), true);
             text(dl, F.medium, 14, ImVec2(bx0 + 16 * S, cy - 3 * S), WHITE, opts::game_path());
             dl->PopClipRect();

@@ -1,7 +1,8 @@
 // Steering Wheel section: picks and sets up the wheel the game drives as a Logitech G25 (runtime/hle_usbd.cpp,
 // runtime/wheel_sdl.cpp), after the Thrustmaster control panel: live steering, pedal and button views, axes found by
 // pressing the pedal, buttons assigned by pressing them on the wheel, the wheel's rotation and the game's steering
-// lock, and the force-feedback gains with test effects. Settings: the [wheel] section of f1ce_launcher.ini; wheel
+// lock, the force-feedback gains with test effects, and a separate USB pedal set (on / off, its device, the pedals
+// calibrated on its axes). Settings: the [wheel] section of f1ce_launcher.ini; wheel
 // profiles: wheels/<name>.ini next to the launcher ([profile] name, wheels = vid:pid list, notes; [wheel] settings).
 #include "wheel_page.h"
 
@@ -47,7 +48,9 @@ std::string S8(const fs::path& p) {
 wheelcfg::Config g_cfg;
 bool g_loaded = false, g_fresh = false, g_visible = false, g_pending_layout = false;
 wheeldev::State g_st;
-unsigned g_seen_open = 0, g_seen_status = 0;
+unsigned g_seen_open = 0, g_seen_status = 0, g_seen_ped = 0;
+bool g_sent_pedals = false;   // the pedal set the thread was told about
+std::string g_sent_pedals_guid;
 std::string g_status = "Looking for wheels...", g_profile;
 unsigned g_prev_buttons[2] = {};
 int g_test = 0;
@@ -55,12 +58,19 @@ int g_index = 0;   // the row being drawn
 
 struct Profile { std::string file, name, wheels, notes; };
 std::vector<Profile> g_profiles;
-std::string wheels_dir() { return S8(P(opts::exe_dir()) / "wheels"); }
+std::string wheels_dir() { return S8(P(opts::data_dir()) / "wheels"); }
 
 struct Calibration { int pedal = -1; Uint64 t0 = 0; int start[AXES], ext[AXES]; } g_cal;
 
 wheelcfg::Pedal& pedal(int i) { return i == 0 ? g_cfg.throttle : i == 1 ? g_cfg.brake : g_cfg.clutch; }
 int axis(int a) { return g_st.open && a >= 0 && a < std::min(g_st.axes, AXES) ? g_st.axis[a] : 0; }
+// the pedals' device: the wheel, or the separate pedal set
+bool pedals_open() { return g_cfg.pedals_separate ? g_st.ped_open : g_st.open; }
+int pedal_axes() { return std::min(g_cfg.pedals_separate ? g_st.ped_axes : g_st.axes, AXES); }
+int pedal_axis(int a) {
+    if (!g_cfg.pedals_separate) return axis(a);
+    return g_st.ped_open && a >= 0 && a < pedal_axes() ? g_st.ped_axis[a] : 0;
+}
 bool button(int b) { return g_st.open && b >= 0 && b < 64 && (g_st.pressed[b / 32] >> (b % 32) & 1); }
 std::string axis_label(int a) { return a < 0 ? "None" : "Axis " + std::to_string(a + 1); }
 std::string button_label(int b) { return b < 0 ? "-" : "Button " + std::to_string(b + 1); }
@@ -101,6 +111,20 @@ int profile_for(unsigned vid, unsigned pid) {
         if (g_profiles[i].wheels.find(id) != std::string::npos) return (int)i;
     return -1;
 }
+// a wheel's settings in place of the current ones: the choice of devices stays, and a separate pedal set keeps its own
+// calibration (a wheel profile or layout has the wheel's pedals)
+void take_wheel_settings(wheelcfg::Config c) {
+    c.device = g_cfg.device;
+    c.enabled = g_cfg.enabled;
+    c.pedals_device = g_cfg.pedals_device;
+    if (g_cfg.pedals_separate) {
+        c.pedals_separate = true;
+        c.throttle = g_cfg.throttle;
+        c.brake = g_cfg.brake;
+        c.clutch = g_cfg.clutch;
+    }
+    g_cfg = c;
+}
 void load_profile(int i) {
     if (i < 0 || i >= (int)g_profiles.size()) return;
     const Profile& pr = g_profiles[i];
@@ -108,9 +132,7 @@ void load_profile(int i) {
     f.load(pr.file);
     wheelcfg::Config c;
     load_section(f, "wheel", c);
-    c.device = g_cfg.device;   // (a profile is the settings, not the choice of wheel)
-    c.enabled = g_cfg.enabled;
-    g_cfg = c;
+    take_wheel_settings(c);   // (a profile is the settings, not the choice of wheel)
     g_profile = pr.name;
     g_fresh = false;
     g_status = "Profile \"" + pr.name + "\" loaded." + (pr.notes.empty() ? "" : " " + pr.notes);
@@ -145,7 +167,7 @@ void save_profile(std::string name) {
     f.set("profile", "wheels", wheels);
     if (existing < 0) f.set("profile", "notes", "Saved by the launcher" + (g_st.open ? " for " + g_st.name : std::string()) + ".");
     wheelcfg::save(g_cfg, [&](const char* k, const std::string& v) {
-        if (strcmp(k, "device") && strcmp(k, "enabled")) f.set("wheel", k, v);
+        if (strcmp(k, "device") && strcmp(k, "enabled") && strcmp(k, "pedals_device")) f.set("wheel", k, v);
     });
     if (!f.save(file)) {
         g_status = "Could not write " + file + ".";
@@ -171,9 +193,36 @@ void vendor_layout(unsigned vid) {
     wheelcfg::defaults_for(c, vid);
     std::copy(c.buttons, c.buttons + wheelcfg::BUTTONS, g_cfg.buttons);
     g_cfg.steer_axis = c.steer_axis;
+    if (g_cfg.pedals_separate) return;   // (the pedal set's own calibration stays)
     g_cfg.throttle = c.throttle;
     g_cfg.brake = c.brake;
     g_cfg.clutch = c.clutch;
+}
+// the pedal set on or off: its pedals are calibrated afresh (another device's axes), the wheel's get its usual layout
+void set_pedals_separate(bool on) {
+    g_cfg.pedals_separate = on;
+    g_cal.pedal = -1;
+    if (on) {
+        for (int i = 0; i < 3; i++) pedal(i) = {};
+        g_status = "Separate pedal set on: select each pedal's Axis row and press the pedal all the way down to calibrate it.";
+    } else {
+        wheelcfg::Config c;
+        wheelcfg::defaults_for(c, g_st.open ? g_st.vid : 0);
+        g_cfg.throttle = c.throttle;
+        g_cfg.brake = c.brake;
+        g_cfg.clutch = c.clutch;
+        g_status = "Pedals on the wheel: its usual pedal axes are set; calibrate them if they do not match.";
+    }
+}
+// the thread opens the pedal set the settings name
+void sync_pedals() {
+    if (g_sent_pedals == g_cfg.pedals_separate && g_sent_pedals_guid == g_cfg.pedals_device) return;
+    g_sent_pedals = g_cfg.pedals_separate;
+    g_sent_pedals_guid = g_cfg.pedals_device;
+    wheeldev::want([](wheeldev::Want& w) {
+        w.pedals = g_sent_pedals;
+        w.pedals_guid = g_sent_pedals_guid;
+    });
 }
 // the wheel the thread opens for the selection
 std::string target_guid() {
@@ -188,7 +237,11 @@ void opened() {
     if (g_fresh) {   // first look at the section: the wheel's profile, else its vendor's usual layout
         const int pr = profile_for(g_st.vid, g_st.pid);
         if (pr >= 0) load_profile(pr);
-        else wheelcfg::defaults_for(g_cfg, g_st.vid);
+        else {
+            wheelcfg::Config c;
+            wheelcfg::defaults_for(c, g_st.vid);
+            take_wheel_settings(c);
+        }
     } else if (g_pending_layout && g_st.guid == target_guid() && g_st.vid) {
         vendor_layout(g_st.vid);
     }
@@ -197,25 +250,25 @@ void opened() {
 
 // ---------------------------------------------------------------- pedal calibration: press the pedal fully
 void calibrate_start(int p) {
-    if (!g_st.open) {
-        g_status = "Connect the wheel first.";
+    if (!pedals_open()) {
+        g_status = g_cfg.pedals_separate ? "Connect the pedal set first (and pick it in the Pedal set row)." : "Connect the wheel first.";
         return;
     }
     g_cal.pedal = p;
     g_cal.t0 = SDL_GetTicks();
-    for (int a = 0; a < AXES; a++) g_cal.start[a] = g_cal.ext[a] = axis(a);
+    for (int a = 0; a < AXES; a++) g_cal.start[a] = g_cal.ext[a] = pedal_axis(a);
     g_status = std::string("Press the ") + PEDAL_NAMES[p] + " pedal all the way down, then let it go.";
 }
 // the axis that moved most: at rest where it started, fully pressed where it went; done when the pedal comes back
 void calibrate_poll() {
-    if (g_cal.pedal < 0 || !g_st.open) return;
+    if (g_cal.pedal < 0 || !pedals_open()) return;
     int best = -1, dev = 0;
-    for (int a = 0; a < AXES && a < g_st.axes; a++) {
-        const int v = axis(a);
+    for (int a = 0; a < pedal_axes(); a++) {
+        const int v = pedal_axis(a);
         if (std::abs(v - g_cal.start[a]) > std::abs(g_cal.ext[a] - g_cal.start[a])) g_cal.ext[a] = v;
         if (std::abs(g_cal.ext[a] - g_cal.start[a]) > dev) { dev = std::abs(g_cal.ext[a] - g_cal.start[a]); best = a; }
     }
-    if (best >= 0 && dev > 12000 && std::abs(axis(best) - g_cal.start[best]) < dev / 4) {
+    if (best >= 0 && dev > 12000 && std::abs(pedal_axis(best) - g_cal.start[best]) < dev / 4) {
         wheelcfg::Pedal& p = pedal(g_cal.pedal);
         p.axis = best;
         p.rest = g_cal.start[best];
@@ -295,17 +348,18 @@ void pedal_bar(int p, bool focused) {
     const float w = b.x - a.x, vw = std::max(250 * S, w * 0.42f);
     const float x0 = a.x + 250 * S, x1 = b.x - vw - 18 * S - 64 * S, cy = (a.y + b.y) / 2;   // (room for the value: 64)
     if (x1 - x0 < 60 * S) return;
-    const int raw = axis(pedal(p).axis);
+    const int raw = pedal_axis(pedal(p).axis);
+    const bool live = pedals_open() && pedal(p).axis >= 0;   // (a missing pedal set: no bar)
     const ImU32 col = p == 1 ? IM_COL32(200, 40, 40, 255) : p == 0 ? IM_COL32(40, 160, 60, 255) : IM_COL32(25, 118, 210, 255);
     const ImU32 track = focused ? IM_COL32(70, 70, 70, 255) : IM_COL32(214, 214, 214, 255), mark = focused ? WHITE : INK;
     dl->AddRectFilled(ImVec2(x0, cy - 5 * S), ImVec2(x1, cy + 5 * S), track);
-    dl->AddRectFilled(ImVec2(x0, cy - 5 * S), ImVec2(x0 + (x1 - x0) * pedal(p).travel(raw), cy + 5 * S), col);
+    if (live) dl->AddRectFilled(ImVec2(x0, cy - 5 * S), ImVec2(x0 + (x1 - x0) * pedal(p).travel(raw), cy + 5 * S), col);
     for (int m : {pedal(p).min, pedal(p).max}) {
         const float mx = x0 + (x1 - x0) * m / 100.0f;
         dl->AddRectFilled(ImVec2(mx - 1, cy - 9 * S), ImVec2(mx + 1, cy + 9 * S), mark);
     }
     char t[16];
-    snprintf(t, sizeof(t), pedal(p).axis < 0 ? "-" : "%.0f%%", pedal(p).value(raw) * 100);
+    snprintf(t, sizeof(t), !live ? "-" : "%.0f%%", pedal(p).value(raw) * 100);
     text(dl, F.semi, 14, ImVec2(x1 + 8 * S, cy - 9 * S), focused ? WHITE : INK, t);
 }
 
@@ -358,6 +412,7 @@ void start(const Ini& ini) {
     read_profiles();
     g_loaded = true;
     wheeldev::start(g_cfg.device);
+    sync_pedals();
 }
 
 void save(Ini& ini) {
@@ -386,6 +441,11 @@ void frame(bool visible) {
     if (g_st.open_gen != g_seen_open) {
         g_seen_open = g_st.open_gen;
         opened();
+    }
+    if (g_st.ped_open_gen != g_seen_ped) {
+        g_seen_ped = g_st.ped_open_gen;
+        if (g_st.ped_open && g_cfg.pedals_separate)
+            g_status = "Pedal set: " + g_st.ped_name + "  -  " + std::to_string(g_st.ped_axes) + " axes.";
     }
     calibrate_poll();
 }
@@ -447,13 +507,11 @@ int rows() {
             ui::open_edit(g_profile, [](const std::string& name) { save_profile(name); });
         if (row("Delete profile", g_profile.empty() ? "-" : g_profile, false, "Deletes the profile shown above.").activated)
             delete_profile();
-        if (row("Defaults for this wheel", "Reset", false, "Its vendor's usual axes, buttons and forces.").activated) {
-            const std::string dev = g_cfg.device;
-            const bool en = g_cfg.enabled;
-            g_cfg = {};
-            g_cfg.device = dev;
-            g_cfg.enabled = en;
-            wheelcfg::defaults_for(g_cfg, g_st.open ? g_st.vid : 0x044f);
+        if (row("Defaults for this wheel", "Reset", false,
+                "Its vendor's usual axes, buttons and forces (a separate pedal set keeps its calibration).").activated) {
+            wheelcfg::Config c;
+            wheelcfg::defaults_for(c, g_st.open ? g_st.vid : 0x044f);
+            take_wheel_settings(c);
         }
     }
 
@@ -480,6 +538,40 @@ int rows() {
         g_cfg.lock = LOCKS[li];
     }
     slider("Steering dead zone", g_cfg.steer_deadzone, 0, 10, 1, "%", "Wheel movement around the centre that does nothing.");
+
+    ui::header_widget("Pedals");
+    {
+        bool sep = g_cfg.pedals_separate;
+        toggle("Separate pedal set", sep,
+               "On: the pedals are a USB device of their own (Fanatec, MOZA, Simucube, Heusinkveld, Thrustmaster T-LCM "
+               "on USB...), read beside the wheel. Off: the pedals plug into the wheel.");
+        if (sep != g_cfg.pedals_separate) set_pedals_separate(sep);
+    }
+    if (g_cfg.pedals_separate) {   // the device: Automatic, the connected ones but the wheel, a saved one not plugged in
+        std::vector<std::pair<std::string, std::string>> devs = {{"", "Automatic (the first pedal set found)"}};
+        for (const wheeldev::Device& d : g_st.devices)
+            if (!(g_st.open && d.guid == g_st.guid)) devs.push_back({d.guid, d.name});
+        if (!g_cfg.pedals_device.empty() &&
+            std::none_of(devs.begin(), devs.end(), [](const auto& d) { return d.first == g_cfg.pedals_device; }))
+            devs.push_back({g_cfg.pedals_device, "Saved pedal set (not connected)"});
+        int sel = 0;
+        for (size_t i = 0; i < devs.size(); i++)
+            if (devs[i].first == g_cfg.pedals_device) sel = (int)i;
+        std::string value = devs[sel].second;
+        if (sel == 0) value = g_st.ped_open ? "Automatic: " + g_st.ped_name : "Automatic (none found)";
+        const ui::RowOut r = row("Pedal set", value, true,
+                                 "The pedals' USB device. Then calibrate each pedal below: select its Axis row and press it.");
+        auto pick = [](const std::string& guid) {
+            g_cfg.pedals_device = guid;
+            g_cal.pedal = -1;
+        };
+        if (r.delta) pick(devs[(sel + r.delta + devs.size()) % devs.size()].first);
+        if (r.activated) {
+            std::vector<std::string> items;
+            for (const auto& d : devs) items.push_back(d.second);
+            ui::open_list(items, sel, [devs, pick](int i) { pick(devs[i].first); });
+        }
+    }
 
     const char* range_help = "The part of the pedal's travel the game uses: below min it reads as released, from max on "
                              "as fully pressed (the marks on the bar).";
@@ -558,6 +650,7 @@ int rows() {
     for (int i = 0; i < wheelcfg::GEARS; i++)
         button_row(i ? "Gear " + std::to_string(i) : std::string("Reverse"), g_cfg.gears[i], "The shifter position's button.");
 
+    sync_pedals();
     return g_index;
 }
 

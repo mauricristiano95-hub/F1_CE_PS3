@@ -1,24 +1,30 @@
 #!/bin/sh
 # Launcher of the Linux build (the AppImage's entry point; also works from an unpacked folder next to usr/bin/f1ce).
 #
-#   F1CE-x86_64.AppImage                 start the game (asks for the PS3_GAME folder the first time)
-#   F1CE-x86_64.AppImage --settings      settings dialog (zenity), then start
-#   F1CE-x86_64.AppImage --game-dir DIR  use DIR as the PS3_GAME folder from now on, then start
-#   F1CE-x86_64.AppImage --reset         forget the game folder and every setting
+#   F1CE-x86_64.AppImage                 the launcher (settings, wheel, keys; START GAME runs the game)
+#   F1CE-x86_64.AppImage --direct        start the game at once, with settings.conf (below) instead of the launcher
+#   F1CE-x86_64.AppImage --settings      --direct with the old settings dialog (zenity) first
+#   F1CE-x86_64.AppImage --game-dir DIR  use DIR as the PS3_GAME folder from now on
+#   F1CE-x86_64.AppImage --reset         forget the game folder and every setting (launcher and settings.conf)
 #   F1CE-x86_64.AppImage --where         print the settings, save data, log and shader cache locations
-#   F1CE-x86_64.AppImage --trace         passed to the game (logs every HLE call, very slow)
+#   F1CE-x86_64.AppImage --trace         passed to the game (logs every HLE call, very slow; --direct only)
 #
-# Settings live in ~/.config/f1ce-recomp/settings.conf, one NAME=value per line: the game folder (F1CE_GAME_DIR) and
-# any F1CE_* variable from the README. Variables already set in the environment win over the file (Steam launch
-# options such as "F1CE_SCALE=2 %command%" work). On a Steam Deck, unset options get Deck defaults (below).
-# Save data and the log (f1ce_recomp.log) are in ~/.local/share/f1ce-recomp, shaders in ~/.cache/f1ce-recomp.
+# The launcher (usr/bin/f1ce_launcher, the Windows one) keeps its settings in ~/.local/share/f1ce-recomp/
+# f1ce_launcher.ini, next to the save data, the log, MODS and wheels (F1CE_DATA_DIR); the first start seeds it with the
+# game folder found below, the settings.conf options and, on a Steam Deck, the Deck defaults. Without a display or
+# with F1CE_DIRECT=1 the game starts directly. Direct-start settings live in ~/.config/f1ce-recomp/settings.conf,
+# one NAME=value per line: the game folder (F1CE_GAME_DIR) and any F1CE_* variable from the README. Variables already
+# set in the environment win over the file (Steam launch options such as "F1CE_SCALE=2 %command%" work; with the
+# launcher only for options it does not have). Shaders are cached in ~/.cache/f1ce-recomp.
 
 HERE=$(dirname "$(readlink -f "$0")")
 BIN="$HERE/usr/bin/f1ce"
+LAUNCHER="$HERE/usr/bin/f1ce_launcher"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/f1ce-recomp"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/f1ce-recomp"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/f1ce-recomp"
 CONF="$CONF_DIR/settings.conf"
+INI="$DATA_DIR/f1ce_launcher.ini"
 TITLE="F1 Championship Edition"
 
 # ------------------------------------------------------------------ messages
@@ -85,7 +91,7 @@ deck_default() {   # deck_default NAME: the value used on a Steam Deck when the 
 }
 
 # ------------------------------------------------------------------ game folder
-valid_game() { [ -n "$1" ] && [ -f "$1/USRDIR/EBOOT.elf" ]; }
+valid_game() { [ -n "$1" ] && { [ -f "$1/USRDIR/EBOOT.BIN" ] || [ -f "$1/USRDIR/EBOOT.elf" ]; }; }   # (the game checks it)
 find_game() {   # the saved folder, else a PS3_GAME next to the AppImage or in the usual places
     g=$(conf_get F1CE_GAME_DIR)
     valid_game "$g" && { echo "$g"; return; }
@@ -96,7 +102,7 @@ find_game() {   # the saved folder, else a PS3_GAME next to the AppImage or in t
     done
 }
 pick_game() {
-    msg="Select the game's PS3_GAME folder (it must contain USRDIR/EBOOT.elf, the decrypted executable)."
+    msg="Select the game's PS3_GAME folder (the one with USRDIR/EBOOT.BIN)."
     if gui && have zenity; then
         zenity --file-selection --directory --title="$msg" 2>/dev/null
     elif gui && have kdialog; then
@@ -170,28 +176,84 @@ EOF
 # ------------------------------------------------------------------ arguments
 GAME_ARGS=""
 want_settings=0
+direct=0
 while [ $# -gt 0 ]; do
     case "$1" in
-        --settings) want_settings=1 ;;
-        --game-dir) shift; valid_game "$1" || fail "Not a PS3_GAME folder (no USRDIR/EBOOT.elf): $1"
-                    conf_set F1CE_GAME_DIR "$(readlink -f "$1")" ;;
-        --reset) rm -f "$CONF"; echo "Settings removed ($CONF)"; exit 0 ;;
-        --where) echo "settings:     $CONF"; echo "save data:    $DATA_DIR/ps3_data"
-                 echo "log:          $DATA_DIR/f1ce_recomp.log"; echo "shader cache: $CACHE_DIR/shader_cache"; exit 0 ;;
-        -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --direct) direct=1 ;;
+        --settings) want_settings=1; direct=1 ;;
+        --game-dir) shift; valid_game "$1" || fail "Not a PS3_GAME folder (no USRDIR/EBOOT.BIN): $1"
+                    g=$(readlink -f "$1")
+                    conf_set F1CE_GAME_DIR "$g"
+                    # (the launcher's [game] path; the only "path" key of its ini)
+                    [ -f "$INI" ] && { sed "s|^path=.*|path=$g|" "$INI" > "$INI.tmp" && mv "$INI.tmp" "$INI"; } ;;
+        --reset) rm -f "$CONF" "$INI"; echo "Settings removed ($CONF, $INI)"; exit 0 ;;
+        --where) echo "launcher:     $INI"; echo "settings:     $CONF (--direct)"; echo "save data:    $DATA_DIR/ps3_data"
+                 echo "log:          $DATA_DIR/f1ce_recomp.log"; echo "mods, wheels: $DATA_DIR/MODS, $DATA_DIR/wheels"
+                 echo "shader cache: $CACHE_DIR/shader_cache"; exit 0 ;;
+        -h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) GAME_ARGS="$GAME_ARGS $1" ;;
     esac
     shift
 done
 
 [ -x "$BIN" ] || fail "f1ce executable missing at $BIN"
+[ "$(conf_get F1CE_DIRECT)" = 1 ] || [ "${F1CE_DIRECT:-0}" = 1 ] && direct=1
+[ -x "$LAUNCHER" ] && gui || direct=1
+
+# ------------------------------------------------------------------ shared start-up
+mkdir -p "$DATA_DIR" "$CACHE_DIR/shader_cache" || fail "Cannot create $DATA_DIR or $CACHE_DIR"
+export F1CE_CACHE_DIR="$CACHE_DIR/shader_cache"
+# program database shipped with the build: the first start compiles every shader up front (progress bar) instead of
+# during play; later runs add the programs they meet to the copy in the cache
+seed="$HERE/usr/share/f1ce-recomp/programs.bin"
+[ -f "$seed" ] && [ ! -f "$F1CE_CACHE_DIR/programs.bin" ] && cp "$seed" "$F1CE_CACHE_DIR/programs.bin"
+# gamescope (Steam Deck game mode) runs games through XWayland
+[ "$gamescope" = 1 ] && [ -z "$SDL_VIDEO_DRIVER" ] && export SDL_VIDEO_DRIVER=x11
+
+# ------------------------------------------------------------------ launcher
+seed_ini() {   # first launcher start: game folder, settings.conf options, Deck / desktop defaults
+    opt() { [ -n "$(conf_get "$1")" ] || echo "$1=$2"; }   # (a settings.conf choice wins: written below)
+    {
+        echo "[options]"
+        echo "preset=original"
+        opt F1CE_SHADOW_RES 1
+        opt F1CE_CUBE_RES 1
+        opt F1CE_RENDERER vulkan
+        if [ "$deck" = 1 ]; then
+            opt F1CE_SCALE 1280x800; opt F1CE_FULLSCREEN 1
+        else
+            opt F1CE_SCALE 1.5
+            [ "$gamescope" = 1 ] && opt F1CE_FULLSCREEN 1
+        fi
+        # options chosen in the old settings dialog (the launcher ignores names and values it does not know)
+        [ -f "$CONF" ] && grep -E '^F1CE_[A-Z0-9_]+=' "$CONF" | grep -v -E '^F1CE_(GAME_DIR|DIRECT)='
+        echo "[game]"
+        echo "path=$(find_game)"
+        [ "$gamescope" = 1 ] && echo "window_maximized=1"
+    } > "$INI.tmp"   # (not "&&": the group's status is its last test's)
+    mv "$INI.tmp" "$INI"
+}
+if [ "$direct" = 0 ]; then
+    mkdir -p "$DATA_DIR/wheels"
+    for f in "$HERE/usr/share/f1ce-recomp/wheels/"*.ini; do   # built-in profiles; the player's edits are kept
+        [ -f "$f" ] && [ ! -f "$DATA_DIR/wheels/${f##*/}" ] && cp "$f" "$DATA_DIR/wheels/"
+    done
+    [ -f "$INI" ] || seed_ini
+    load_conf   # (variables the launcher has no option for still reach the game)
+    unset F1CE_GAME_DIR F1CE_DIRECT
+    export F1CE_DATA_DIR="$DATA_DIR"
+    cd "$DATA_DIR" || exit 1
+    exec "$LAUNCHER"
+fi
+
+# ------------------------------------------------------------------ direct start
 [ "$want_settings" = 1 ] && settings_dialog
 
 GAME=$(find_game)
 if ! valid_game "$GAME"; then
     GAME=$(pick_game)
     [ -n "$GAME" ] || fail "No game folder selected. Start again with --game-dir /path/to/PS3_GAME."
-    valid_game "$GAME" || fail "Not a PS3_GAME folder with a decrypted USRDIR/EBOOT.elf: $GAME"
+    valid_game "$GAME" || fail "Not a PS3_GAME folder (no USRDIR/EBOOT.BIN): $GAME"
 fi
 GAME=$(readlink -f "$GAME")
 [ "$(conf_get F1CE_GAME_DIR)" = "$GAME" ] || conf_set F1CE_GAME_DIR "$GAME"
@@ -203,20 +265,10 @@ if [ "$deck" = 1 ]; then
     # native panel resolution and Vulkan (RADV); the original 30 fps mode (60 fps is experimental)
     for n in F1CE_RENDERER F1CE_SCALE F1CE_FULLSCREEN; do default $n "$(deck_default $n)"; done
 fi
-if [ "$gamescope" = 1 ]; then
-    default F1CE_FULLSCREEN 1
-    # gamescope (Steam Deck game mode) runs games through XWayland
-    [ -n "$SDL_VIDEO_DRIVER" ] || export SDL_VIDEO_DRIVER=x11
-fi
+[ "$gamescope" = 1 ] && default F1CE_FULLSCREEN 1
 
 # ------------------------------------------------------------------ run
-mkdir -p "$DATA_DIR" "$CACHE_DIR/shader_cache" || fail "Cannot create $DATA_DIR or $CACHE_DIR"
-export F1CE_CACHE_DIR="$CACHE_DIR/shader_cache"
-# program database shipped with the build: the first start compiles every shader up front (progress bar) instead of
-# during play; later runs add the programs they meet to the copy in the cache
-seed="$HERE/usr/share/f1ce-recomp/programs.bin"
-[ -f "$seed" ] && [ ! -f "$F1CE_CACHE_DIR/programs.bin" ] && cp "$seed" "$F1CE_CACHE_DIR/programs.bin"
-unset F1CE_GAME_DIR
+unset F1CE_GAME_DIR F1CE_DIRECT
 cd "$DATA_DIR" || exit 1
 # shellcheck disable=SC2086
 exec "$BIN" "$GAME" $GAME_ARGS

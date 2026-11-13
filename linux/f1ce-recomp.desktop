@@ -8,8 +8,8 @@ Icon=f1ce-recomp
 Terminal=false
 Categories=Game;
 StartupWMClass=f1ce-recomp
-Actions=Settings;
+Actions=Direct;
 
-[Desktop Action Settings]
-Name=Settings
-Exec=AppRun --settings
+[Desktop Action Direct]
+Name=Start the game without the launcher
+Exec=AppRun --direct

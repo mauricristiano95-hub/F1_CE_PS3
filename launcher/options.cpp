@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <thread>
 
+#include "../runtime/self_decrypt.h"
 #include "ini.h"
 
 #ifdef _WIN32
@@ -49,7 +50,7 @@ std::string U(const std::wstring& w) {
 }
 #endif
 
-std::string g_exe_dir, g_game_path;
+std::string g_exe_dir, g_data_dir, g_game_path;
 bool g_dev_mode = false;
 
 Option choice(Page p, const char* label, const char* key, std::vector<Choice> ch, int def, const char* help) {
@@ -349,7 +350,7 @@ void apply_preset(int p, const Ini& ini) {
 void add_season_packs() {
     static std::vector<std::string> names;   // (stable: the choices are copies anyway)
     std::error_code ec;
-    for (const auto& e : fs::directory_iterator(P(g_exe_dir) / "MODS", ec))
+    for (const auto& e : fs::directory_iterator(P(g_data_dir) / "MODS", ec))
         if (e.is_directory(ec) && S(e.path().filename())[0] != '.') names.push_back(S(e.path().filename()));
     std::sort(names.begin(), names.end());
     Option& o = *find("F1CE_MOD_PACK");
@@ -494,8 +495,11 @@ Option* find(const char* key) {
 void init(const std::string& exe_dir) {
     g_exe_dir = exe_dir;
     while (!g_exe_dir.empty() && (g_exe_dir.back() == '/' || g_exe_dir.back() == '\\')) g_exe_dir.pop_back();
+    const char* data_env = getenv("F1CE_DATA_DIR");
+    g_data_dir = data_env && *data_env ? data_env : g_exe_dir;
+    while (!g_data_dir.empty() && (g_data_dir.back() == '/' || g_data_dir.back() == '\\')) g_data_dir.pop_back();
     g_options = make_options();
-    {   // older versions ran the game in the parent folder: copy the saves from there once (the old folder is left alone)
+    if (!data_env || !*data_env) {   // older versions ran the game in the parent folder: copy the saves from there once (the old folder is left alone)
         std::error_code ec;
         const fs::path data = P(g_exe_dir) / "ps3_data", old = P(g_exe_dir).parent_path() / "ps3_data";
         if (!fs::exists(data, ec) && fs::is_directory(old / "dev_hdd0" / "home", ec))
@@ -505,8 +509,9 @@ void init(const std::string& exe_dir) {
     add_gpus();
 }
 const std::string& exe_dir() { return g_exe_dir; }
+const std::string& data_dir() { return g_data_dir; }
 bool dev_mode() { return g_dev_mode; }
-std::string ini_path() { return S(P(g_exe_dir) / "f1ce_launcher.ini"); }
+std::string ini_path() { return S(P(g_data_dir) / "f1ce_launcher.ini"); }
 std::string& game_path() { return g_game_path; }
 
 void load(const Ini& ini) {
@@ -563,9 +568,21 @@ std::string game_path_problem() {
     if (g_game_path.empty()) return "Choose the game's PS3_GAME folder.";
     if (!fs::is_regular_file(g / "USRDIR" / "EBOOT.BIN", ec) && !fs::is_regular_file(g / "PARAM.SFO", ec))
         return "This folder does not look like the game's PS3_GAME folder.";
-    if (!fs::is_regular_file(g / "USRDIR" / "EBOOT.elf", ec))
-        return "USRDIR/EBOOT.elf is missing: the game needs the decrypted executable next to EBOOT.BIN.";
-    return {};
+    // the game's own check (the disc's EBOOT.BIN decrypted, or an EBOOT.elf), again only when the files change
+    std::string key = g_game_path;
+    for (const char* f : {"EBOOT.BIN", "EBOOT.elf"}) {
+        const fs::path p = g / "USRDIR" / f;
+        const unsigned long long size = fs::file_size(p, ec);
+        const long long time = fs::last_write_time(p, ec).time_since_epoch().count();
+        key += "|" + std::to_string(ec ? 0ull : size) + ":" + std::to_string(ec ? 0ll : time);
+    }
+    static std::string cached_key, cached_problem;
+    if (key != cached_key) {
+        std::vector<uint8_t> elf;
+        cached_problem = eboot::load(g, elf);
+        cached_key = key;
+    }
+    return cached_problem;
 }
 
 std::string gpu_summary() {
@@ -604,7 +621,7 @@ std::string start_game(Ini& ini, std::function<void(unsigned)> exited) {
         }
         if (o.kind == TEXT && strcmp(o.key, "extra")) set_env(o.key, o.text.empty() ? nullptr : o.text.c_str());
     }
-    set_env("F1CE_MODS_DIR", S(P(g_exe_dir) / "MODS").c_str());
+    set_env("F1CE_MODS_DIR", S(P(g_data_dir) / "MODS").c_str());
     {   // extra: NAME=value tokens
         const std::string extra = (g_dev_mode ? find("extra")->text : std::string()) + " ";
         size_t s = 0;
@@ -622,7 +639,7 @@ std::string start_game(Ini& ini, std::function<void(unsigned)> exited) {
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
-    if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, W(g_exe_dir).c_str(),
+    if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, W(g_data_dir).c_str(),
                         &si, &pi))
         return "Could not start " + U(exe) + " (error " + std::to_string(GetLastError()) + ").";
     CloseHandle(pi.hThread);
@@ -640,7 +657,7 @@ std::string start_game(Ini& ini, std::function<void(unsigned)> exited) {
     std::vector<char*> argv;
     for (std::string& a : argv_s) argv.push_back(a.data());
     argv.push_back(nullptr);
-    if (chdir(g_exe_dir.c_str()) != 0) return "Could not enter " + g_exe_dir + ".";
+    if (chdir(g_data_dir.c_str()) != 0) return "Could not enter " + g_data_dir + ".";
     pid_t pid;
     if (posix_spawn(&pid, exe.c_str(), nullptr, nullptr, argv.data(), environ) != 0) return "Could not start " + exe + ".";
     std::thread([pid, exited] {
@@ -658,6 +675,6 @@ std::string exit_message(unsigned code) {
     snprintf(hex, sizeof(hex), "0x%08X", code);
     std::string m = "The game stopped with code " + std::to_string(code) + " (" + hex + ").\n";
     if (code == 0xC000001D) m += "Illegal instruction: this CPU lacks an instruction set the game needs (AVX2).\n";
-    return m + "See " + S(P(g_exe_dir) / "f1ce_recomp.log");
+    return m + "See " + S(P(g_data_dir) / "f1ce_recomp.log");
 }
 }  // namespace opts

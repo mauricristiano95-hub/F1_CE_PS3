@@ -1,7 +1,8 @@
-// Loads the game's (decrypted) EBOOT.elf segments into guest memory at runtime and starts the
-// main PPU thread. The recompiled code never embeds game data; it is read from the user's copy.
+// Loads the game's executable segments (EBOOT.BIN, decrypted by self_decrypt.cpp) into guest memory at runtime
+// and starts the main PPU thread. The recompiled code never embeds game data; it is read from the user's copy.
 #include "host.h"
 #include "kernel.h"
+#include "self_decrypt.h"
 
 #include <filesystem>
 #include <fstream>
@@ -51,12 +52,7 @@ struct LoadedProcess { u32 entry_opd; u32 stack_size; s32 prio; };
 
 u32 g_ticks_per_frame_ea = 0;   // set by F1CE_60FPS
 
-LoadedProcess load_elf(const std::string& path) {
-    std::ifstream f(std::filesystem::u8path(path), std::ios::binary);
-    if (!f) fatal("cannot open %s", path.c_str());
-    std::vector<u8> d((std::istreambuf_iterator<char>(f)), {});
-    if (d.size() < 64 || memcmp(d.data(), "\x7f" "ELF\x02\x02", 6)) fatal("%s is not a decrypted PPU ELF", path.c_str());
-
+LoadedProcess load_elf(const std::vector<u8>& d) {
     LoadedProcess p{be<u32>(&d[24 + 4]), 0x100000, 1001};
     u64 phoff = be<u64>(&d[32]);
     u16 phnum = be<u16>(&d[56]);
@@ -117,9 +113,12 @@ int main(int argc, char** argv) {
         if (a == "--trace") g_log_trace = true;
         else game = a;
     }
-    if (!fs::exists(fs::u8path(game) / "USRDIR" / "EBOOT.elf"))
-        fatal("PS3_GAME folder with a decrypted USRDIR/EBOOT.elf not found at '%s'. Pass it as first argument.",
-              game.c_str());
+    if (!fs::exists(fs::u8path(game) / "USRDIR"))
+        fatal("PS3_GAME folder not found at '%s'. Pass it as first argument.", game.c_str());
+    // the disc's EBOOT.BIN, decrypted here (or a checked EBOOT.elf)
+    std::vector<u8> elf;
+    if (const std::string e = eboot::load(fs::u8path(game), elf); !e.empty())
+        fatal("%s\n\nGame folder: %s", e.c_str(), game.c_str());
     g_game_dir = PATH_STR(fs::absolute(fs::u8path(game)));
     g_data_dir = PATH_STR(fs::current_path() / "ps3_data");
     fs::create_directories(fs::u8path(g_data_dir) / "dev_hdd0" / "game");
@@ -135,7 +134,8 @@ int main(int argc, char** argv) {
     extern void start_host_profiler();
     start_host_profiler();
     if (getenv("F1CE_SPU_BENCH")) { extern void spu_bench(); spu_bench(); exit(0); }
-    LoadedProcess p = load_elf(PATH_STR(fs::u8path(g_game_dir) / "USRDIR" / "EBOOT.elf"));
+    LoadedProcess p = load_elf(elf);
+    std::vector<u8>().swap(elf);
     run_main_thread(p.entry_opd, p.stack_size, p.prio);
     LOG_I("main thread returned");
     return 0;

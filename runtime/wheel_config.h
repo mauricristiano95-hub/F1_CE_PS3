@@ -3,7 +3,9 @@
 //
 // Axes and buttons are SDL joystick indices (-1: none). A pedal is calibrated by its raw values at rest and fully
 // pressed (any order, so no invert flag; combined pedals: throttle and brake on one axis, each with its own half), and
-// the part of that travel the game uses (min..max percent; older inis: a dead zone at each end).
+// the part of that travel the game uses (min..max percent; older inis: a dead zone at each end). With a separate pedal
+// set (pedals_separate: its own USB device, e.g. Fanatec/MOZA/Simucube/Heusinkveld pedals) the three pedal axes are
+// that device's; steering, buttons and force feedback stay on the wheel.
 #pragma once
 #include <algorithm>
 #include <cstdio>
@@ -11,6 +13,7 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <vector>
 
 namespace wheelcfg {
 // logical buttons (host::WheelButton order), the key suffixes of btn_<name>, and their names in the launcher
@@ -52,6 +55,8 @@ struct Config {
     int lock = 0;                     // degrees lock to lock in the game; 0: the game's choice (its range command)
     int steer_deadzone = 0;           // percent
     Pedal throttle{1}, brake{5}, clutch{6};
+    bool pedals_separate = false;     // the pedals are a USB device of their own
+    std::string pedals_device;        // its SDL joystick GUID; empty: the first one found (see pick)
     int buttons[BUTTONS];
     bool hat_dpad = true;             // the first hat is the d-pad
     int gears[GEARS];                 // H-shifter
@@ -122,6 +127,42 @@ inline const char* vendor_name(unsigned vid) {
     }
 }
 
+// ------------------------------------------------------------------ the wheel and the pedal set among the joysticks
+struct Joy {
+    std::string guid;
+    bool wheel_type = false;   // SDL calls it a wheel
+    bool vendor = false;       // from a wheel vendor (vendor_name): their pedal sets too
+    bool gamepad = false;      // SDL maps it as a gamepad
+};
+// the game's and the launcher's choice (indices into joys, -1: none). The wheel: the device GUID, else the first wheel
+// (with a separate pedal set: not the pedals' device, and SDL's wheels before the vendors' other devices, since a
+// Fanatec or MOZA pedal set has the vendor's USB id too). The pedal set: its GUID, else the first other joystick that
+// is not a gamepad, a wheel vendor's first.
+inline void pick(const Config& c, const std::vector<Joy>& joys, int& wheel, int& pedals) {
+    const int n = (int)joys.size();
+    wheel = pedals = -1;
+    const bool sep = c.pedals_separate;
+    auto first = [&](auto ok) {
+        for (int i = 0; i < n; i++)
+            if (ok(joys[i])) return i;
+        return -1;
+    };
+    if (!c.device.empty()) wheel = first([&](const Joy& j) { return j.guid == c.device; });
+    else if (!sep) wheel = first([](const Joy& j) { return j.wheel_type || j.vendor; });
+    else {
+        auto not_pedals = [&](const Joy& j) { return c.pedals_device.empty() || j.guid != c.pedals_device; };
+        wheel = first([&](const Joy& j) { return j.wheel_type && not_pedals(j); });
+        if (wheel < 0) wheel = first([&](const Joy& j) { return j.vendor && not_pedals(j); });
+    }
+    if (!sep) return;
+    auto other = [&](int i) { return i != wheel && (wheel < 0 || joys[i].guid != joys[wheel].guid); };
+    for (int i = 0; i < n && pedals < 0; i++)
+        if (other(i) && (!c.pedals_device.empty() ? joys[i].guid == c.pedals_device : !joys[i].gamepad && joys[i].vendor))
+            pedals = i;
+    for (int i = 0; i < n && pedals < 0 && c.pedals_device.empty(); i++)
+        if (other(i) && !joys[i].gamepad) pedals = i;
+}
+
 // ------------------------------------------------------------------ the ini section
 using Section = std::map<std::string, std::string>;
 
@@ -182,6 +223,8 @@ void load(Config& c, Get get) {
     pedal("throttle", c.throttle);
     pedal("brake", c.brake);
     pedal("clutch", c.clutch);
+    b("pedals_separate", c.pedals_separate);
+    if (const char* s = get("pedals_device")) c.pedals_device = s;
     for (int n = 0; n < BUTTONS; n++) {
         char k[32];
         snprintf(k, sizeof(k), "btn_%s", BUTTON_KEYS[n]);
@@ -232,6 +275,8 @@ void save(const Config& c, Put put) {
     pedal("throttle", c.throttle);
     pedal("brake", c.brake);
     pedal("clutch", c.clutch);
+    i("pedals_separate", c.pedals_separate);
+    put("pedals_device", c.pedals_device);
     for (int n = 0; n < BUTTONS; n++) {
         char k[32];
         snprintf(k, sizeof(k), "btn_%s", BUTTON_KEYS[n]);

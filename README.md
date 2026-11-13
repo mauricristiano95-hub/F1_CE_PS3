@@ -17,6 +17,7 @@ executable reads your own `PS3_GAME` folder at runtime.
 | `tools/frames_to_png.py` | converts frame dumps (`frame_*.argb`) to PNG |
 | `ghidra/scripts/ExportDecomp.java` | headless Ghidra export of pseudo-C for every function (`out/decomp/`) |
 | `runtime/core.cpp`, `loader.cpp` | guest memory, threads, dispatch, crash diagnostics, ELF loading |
+| `runtime/self_decrypt.cpp` | decrypts the disc's `USRDIR/EBOOT.BIN` (retail SELF) in memory and checks it is the 01.00 executable; also used by the launchers |
 | `runtime/lv2.cpp`, `fs.cpp` | LV2 syscalls (threads, sync, events, timers, memory, tty, file system) |
 | `runtime/hle_*.cpp` | HLE for the 9 imported libraries (sysPrxForUser, sys_io, sys_fs, cellSysutil, cellAudio, cellGcmSys, cellSpurs, cellUsbd, cellSysmodule) |
 | `runtime/spu.cpp` | SPU execution: block cache + dispatcher, MFC DMA (incl. lists with stall-and-notify), atomics, events, interrupts |
@@ -99,7 +100,7 @@ more downloads in `third_party/` (not in git):
 
 ```sh
 cmake --build build-win -j 6 --target f1ce_launcher_new     # -> build-win/f1ce_launcher_new.exe + build-win/wheels/
-cmake --build build-linux -j 6 --target f1ce_launcher_new   # Linux cross build (not packaged in the AppImage yet)
+cmake --build build-linux -j 6 --target f1ce_launcher_new   # Linux cross build (the AppImage's usr/bin/f1ce_launcher)
 ```
 
 The new launcher hides its DEVELOPER section (and does not pass its options) unless `F1CE_DEV_MODE=1` is set in the
@@ -153,7 +154,15 @@ attached the game makes it the player's controller (the pad's ✕ no longer star
   G29/G923 PS, G920/G923 Xbox, Thrustmaster T300/TX/T248, TX + Ferrari SF1000 (from this PC's Assetto Corsa setup),
   T500 RS, T150/TMX, Fanatec CSL DD/ClubSport, MOZA R series, PXN. The first time the tab sees a wheel without saved
   settings it loads the profile listing its vid:pid. Thrustmaster wheels: throttle Rz (axis 5), brake Y (axis 1),
-  right paddle button 1. Pedals on a separate USB device (Fanatec/MOZA/Simucube USB pedals) are not read.
+  right paddle button 1.
+- Separate pedal sets (Fanatec/MOZA/Simucube/Heusinkveld/T-LCM pedals on their own USB cable): Pedals -> Separate
+  pedal set On in the Steering Wheel section, then the Pedal set row (Automatic or a device) and each pedal's Axis row
+  (press it fully to calibrate on the pedal set's axes). Keys `pedals_separate`, `pedals_device` (GUID; not stored in
+  profiles, and a profile or the wheel's defaults leave a separate set's calibration alone). Steering, buttons and
+  force feedback stay on the wheel. Automatic choice (`wheelcfg::pick`, shared by game and launcher): the wheel is
+  SDL's wheel type before a wheel vendor's other devices (Fanatec/MOZA pedals carry the vendor's USB id); the pedal
+  set is the first other non-gamepad joystick, a wheel vendor's first. The game rescans every second while the set
+  is missing (pedals read as released) and logs `wheel: pedal set ...`.
 - Buttons, measured on the controller's action flags: G25 byte 1 bits 0/1 (the paddles) = gear up/down, Start =
   pause, R2 = look back, L2 = change camera, Select, ✕ accept / ◯ back in menus, the hat = d-pad (in-race menus).
 - Force feedback: the game sends the Logitech classic protocol, but its send path 0x558160 overwrites byte 0 (slot and
@@ -173,7 +182,8 @@ attached the game makes it the player's controller (the pad's ✕ no longer star
 
 ## Linux and Steam Deck
 
-Built, packaged and checked on Windows, **not run on Linux yet** (no Linux machine here).
+Built and packaged on Windows. First run on a Steam Deck by the user (2026-11-13, direct start): runs well, below
+30 fps at the race start, 22-23 W at peak. Not run on a desktop distribution yet.
 
 **Building** (on Windows, Git Bash): `sh linux/build_from_windows.sh` makes `out/F1CE-x86_64.AppImage` and
 `out/F1CE-x86_64.tar.gz` (the same AppImage with its executable bit, which most copies from Windows lose). Steps:
@@ -194,14 +204,20 @@ The AppImage holds code generated from the game's executable: it is for your own
 
 **Running:** make the AppImage executable (`chmod +x`, or unpack the `.tar.gz`) and start it. The first time it looks
 for `PS3_GAME` next to the AppImage (also one folder down), in `~/Games/F1CE/` and on SD cards (`/run/media/*/*/F1CE/`),
-else asks for the folder (zenity or kdialog). It needs `USRDIR/EBOOT.elf`, the decrypted executable, as on Windows.
+else asks for the folder (zenity or kdialog). It needs the disc's `USRDIR/EBOOT.BIN`, which the game decrypts itself, as on Windows.
+
+With a display, AppRun opens the ImGui launcher (`usr/bin/f1ce_launcher`) with `F1CE_DATA_DIR=~/.local/share/f1ce-recomp`:
+its ini, saves, log, `MODS/` and `wheels/` live there (the AppImage is read-only) and the game runs there. Its first
+start seeds `f1ce_launcher.ini` with the game folder found, the settings.conf options and the Deck defaults below,
+and copies the built-in wheel profiles (kept if edited). Without a display, with `--direct` or `F1CE_DIRECT=1`, the
+game starts at once with settings.conf.
 
 | | |
 |---|---|
-| `--settings` | settings dialog (zenity: renderer, resolution, full screen, vsync, MSAA, FXAA, 60 fps mode and cap, vibration, intro skip, language), then start; also the desktop entry's "Settings" action |
-| `--game-dir <dir>`, `--reset`, `--where`, `--trace` | set the game folder / forget all settings / print the paths below / passed to the game |
-| `~/.config/f1ce-recomp/settings.conf` | `F1CE_GAME_DIR` and any `F1CE_*` variable of this README, one `NAME=value` per line; variables set in the environment win (Steam launch options `F1CE_SCALE=2 %command%`) |
-| `~/.local/share/f1ce-recomp/` | working folder: `ps3_data/` (saves), `f1ce_recomp.log` |
+| `--direct`, `--settings` | start without the launcher; `--settings` shows the old zenity dialog first (renderer, resolution, full screen, vsync, MSAA, FXAA, 60 fps mode and cap, vibration, intro skip, language); `--direct` is also the desktop entry's action |
+| `--game-dir <dir>`, `--reset`, `--where`, `--trace` | set the game folder (also in the launcher's ini) / forget all settings (settings.conf and the launcher's ini) / print the paths below / passed to the game (direct only) |
+| `~/.config/f1ce-recomp/settings.conf` | direct start: `F1CE_GAME_DIR` and any `F1CE_*` variable of this README, one `NAME=value` per line; variables set in the environment win (Steam launch options `F1CE_SCALE=2 %command%`; with the launcher only for options it does not set) |
+| `~/.local/share/f1ce-recomp/` | working folder: `f1ce_launcher.ini`, `ps3_data/` (saves), `f1ce_recomp.log`, `MODS/`, `wheels/` |
 | `~/.cache/f1ce-recomp/shader_cache/` | shader cache (`F1CE_CACHE_DIR`; on Windows it stays next to the executable) |
 
 **Steam Deck:** copy the AppImage (or unpack the `.tar.gz`) and `PS3_GAME` into one folder, e.g. `~/Games/F1CE/`, in
@@ -1495,3 +1511,19 @@ Enter) and wheel buttons drive it; the game reads a released pad while it is up 
 - Checked by scripted runs from Manage Profiles with two profiles: load P001, create P002, overwrite question,
   delete P000, cancel; OpenGL and Vulkan. Not yet tried by the user, nor the in-game saves (race weekend, season,
   career, ghosts), which use the same list.
+
+**2026-11-13** – separate USB pedal sets for wheels (testers' request): `[wheel] pedals_separate`/`pedals_device`,
+the pedal axes read from a second SDL joystick in `runtime/wheel_sdl.cpp`, launcher Steering Wheel section Pedals
+header (on/off, device, calibration on the pedal set's axes; `launcher/wheel_device.cpp` opens it beside the wheel).
+Device choice tested with simulated joystick lists and the launcher by screenshots; not yet with a real pedal set.
+
+**2026-11-13** – built-in EBOOT decryption (testers' EBOOT.elf files were often wrong): `runtime/self_decrypt.cpp`
+decrypts the disc's `USRDIR/EBOOT.BIN` in memory at every start (SCE header -> metadata info AES-256-CBC with the APP
+key of revision 1 -> metadata headers AES-128-CTR -> segments AES-128-CTR + inflate; own AES and inflate, no new
+library), ~30 ms. The result is byte-identical to RPCS3's decrypted EBOOT.elf. The executable is checked by
+`eboot::image_hash` (FNV-1a of entry point, program headers and segment contents: section headers are left out
+because decrypters write them differently) against the 01.00 disc's; another revision, version or a damaged copy gets
+a message naming the problem. Order: EBOOT.BIN (encrypted, fake-signed or already a plain ELF), else a correct
+`USRDIR/EBOOT.elf`; nothing is written into the game folder. Both launchers run the same check before starting (the
+ImGui launcher's game-folder line again only when the files change), AppRun accepts a folder with EBOOT.BIN.
+Building still reads `input/EBOOT.elf`.

@@ -3,7 +3,9 @@
 
     python linux/make_appimage.py [--exe build-linux/f1ce] [--out out/F1CE-x86_64.AppImage]
 
-AppDir: AppRun (linux/AppRun, the launcher), the .desktop file and icon, usr/bin/f1ce and, when it exists, the program
+AppDir: AppRun (linux/AppRun, the start script), the .desktop file and icon, usr/bin/f1ce, the ImGui launcher
+usr/bin/f1ce_launcher with the built-in wheel profiles in usr/share/f1ce-recomp/wheels (when build-linux has it) and,
+when it exists, the program
 database usr/share/f1ce-recomp/programs.bin (build-win/shader_cache/programs.bin: the shader microcode the game has
 used, so the first start compiles every shader up front). The image is a SquashFS 4.0 filesystem (zlib, no
 fragments) written by this script, after the AppImage type 2 runtime (downloaded once into
@@ -222,6 +224,8 @@ def main():
     top = os.path.dirname(here)
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--exe", default=os.path.join(top, "build-linux", "f1ce"))
+    ap.add_argument("--launcher", default=os.path.join(top, "build-linux", "f1ce_launcher_new"),
+                    help="the ImGui launcher (missing: AppRun starts the game directly)")
     ap.add_argument("--out", default=os.path.join(top, "out", "F1CE-x86_64.AppImage"))
     ap.add_argument("--programs", default=os.path.join(top, "build-win", "shader_cache", "programs.bin"),
                     help="program database to include (missing: none)")
@@ -245,6 +249,16 @@ def main():
     add(root, "f1ce-recomp.png", icon, 0o644)
     add(root, ".DirIcon", icon, 0o644)
     add(root, "usr/bin/f1ce", exe, 0o755)
+    if os.path.isfile(args.launcher):
+        launcher = stripped(args.launcher) if not args.no_strip else open(args.launcher, "rb").read()
+        add(root, "usr/bin/f1ce_launcher", launcher, 0o755)
+        wheels = os.path.join(top, "launcher", "wheels")   # built-in wheel profiles, copied to the data folder by AppRun
+        for name in sorted(os.listdir(wheels)):
+            if name.endswith(".ini"):
+                add(root, "usr/share/f1ce-recomp/wheels/" + name, open(os.path.join(wheels, name), "rb").read(), 0o644)
+        print(f"launcher: {args.launcher}")
+    else:
+        print(f"no launcher at {args.launcher}: AppRun will start the game directly")
     add(root, "usr/share/applications/f1ce-recomp.desktop", desktop, 0o644)
     add(root, "usr/share/icons/hicolor/512x512/apps/f1ce-recomp.png", icon, 0o644)
     if not args.no_programs and os.path.isfile(args.programs):

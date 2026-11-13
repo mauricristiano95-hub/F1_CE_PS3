@@ -11,7 +11,7 @@
 
 namespace wheeldev {
 constexpr int AXES = 12;
-struct Device { std::string guid, label; bool wheel; };
+struct Device { std::string guid, label, name; bool wheel; };   // (label: name, or name and "not a wheel")
 struct State {
     bool ready = false, sdl = false;      // the thread runs / SDL's joystick subsystem works
     std::vector<Device> devices;
@@ -25,8 +25,15 @@ struct State {
     unsigned char hat = 0;
     std::string status;                   // the wheel found, or what went wrong
     unsigned status_gen = 0;
+    // the separate pedal set (Want::pedals)
+    bool ped_open = false;
+    std::string ped_guid, ped_name;
+    unsigned ped_open_gen = 0;
+    int ped_axes = 0;
+    int ped_axis[AXES] = {};
 };
-struct Want { bool open = true, fast = false, haptic = true; std::string guid; };   // guid empty: the first wheel
+// guid empty: the first wheel; pedals_guid empty: the first pedal set (wheelcfg::pick, as the game picks them)
+struct Want { bool open = true, fast = false, haptic = true, pedals = false; std::string guid, pedals_guid; };
 
 void start(const std::string& guid);
 void want(const std::function<void(Want&)>& change);

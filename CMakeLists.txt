@@ -56,6 +56,7 @@ endif()
 set(RUNTIME_SOURCES
   runtime/core.cpp
   runtime/loader.cpp
+  runtime/self_decrypt.cpp
   runtime/lv2.cpp
   runtime/fs.cpp
   runtime/mods.cpp
@@ -172,7 +173,9 @@ endif()
 if(WIN32)
   target_link_options(f1ce PRIVATE -static -Wl,--stack,8388608 -Wl,-Map=f1ce.map)
   enable_language(RC)
-  add_executable(f1ce_launcher WIN32 launcher/f1ce_launcher.cpp launcher/wheel_tab.cpp launcher/f1ce_launcher.rc)
+  # the resource compiler's include is not tracked: rebuild the version resource when version.h changes
+  set_source_files_properties(launcher/f1ce_launcher.rc PROPERTIES OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/launcher/version.h)
+  add_executable(f1ce_launcher WIN32 launcher/f1ce_launcher.cpp launcher/wheel_tab.cpp runtime/self_decrypt.cpp launcher/f1ce_launcher.rc)
   set_target_properties(f1ce_launcher PROPERTIES COMPILE_OPTIONS "" LINK_OPTIONS "")   # no PGO/LTO
   target_compile_definitions(f1ce_launcher PRIVATE UNICODE _UNICODE _WIN32_WINNT=0x0A00)
   target_link_options(f1ce_launcher PRIVATE -static -municode)
@@ -201,7 +204,7 @@ if(F1CE_HOST STREQUAL "SDL")
     list(APPEND LAUNCHER_EMBEDS ${LAUNCHER_GEN}/${name}.h)
   endforeach()
   set(IMGUI_DIR third_party/imgui-1.93.0)
-  add_executable(f1ce_launcher_new launcher/ui.cpp launcher/options.cpp launcher/ini.cpp launcher/wheel_device.cpp
+  add_executable(f1ce_launcher_new launcher/ui.cpp launcher/options.cpp launcher/ini.cpp launcher/wheel_device.cpp runtime/self_decrypt.cpp
     launcher/wheel_page.cpp launcher/input_page.cpp ${IMGUI_DIR}/imgui.cpp ${IMGUI_DIR}/imgui_draw.cpp ${IMGUI_DIR}/imgui_tables.cpp
     ${IMGUI_DIR}/imgui_widgets.cpp ${IMGUI_DIR}/backends/imgui_impl_sdl3.cpp ${IMGUI_DIR}/backends/imgui_impl_sdlrenderer3.cpp
     ${LAUNCHER_EMBEDS})
