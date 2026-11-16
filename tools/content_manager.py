@@ -270,12 +270,25 @@ class App(tk.Tk):
         ttk.Button(row, text='Open 3D model folder', command=lambda: self.open_sub('model')).pack(side='left')
 
     def _rims_tab(self):
-        self.rims_tab, self.rim_list, d = self._list_and_detail('Rims')
+        self.rims_tab, self.rim_list, d = self._list_and_detail('Rims and tyres')
         self.rim_list.bind('<<ListboxSelect>>', lambda e: self.show_rims())
         ttk.Label(d, wraplength=900, justify='left', foreground='#555',
                   text='The rims and tyres a car uses are named in the database; several cars share some files (the '
                        '"Shared with" line), so a change there changes every car listed. "Blurred" versions are drawn '
                        'when the wheels spin fast. The garage car uses the same wheel textures.').pack(anchor='w')
+        row = ttk.Frame(d)
+        row.pack(fill='x', pady=(6, 0))
+        ttk.Label(row, text='Tyre maker (sidewall)').pack(side='left')
+        self.maker_var = tk.StringVar()
+        self.maker_box = ttk.Combobox(row, textvariable=self.maker_var, state='readonly', width=24)
+        self.maker_box.pack(side='left', padx=6)
+        self.maker_box.bind('<<ComboboxSelected>>', lambda e: self.set_maker())
+        ttk.Button(row, text='New tyre maker...', command=self.new_maker).pack(side='left')
+        ttk.Button(row, text='Open 3D tyre model folder',
+                   command=lambda: open_path(self.pack / 'WHEELS' / 'model') if self.pack and
+                   (self.pack / 'WHEELS' / 'model').is_dir() else messagebox.showinfo(
+                       'Content Manager', 'This pack has no 3D models: create it with "New packs with 3D '
+                       'models".')).pack(side='left', padx=6)
         imgs = ttk.Frame(d)
         imgs.pack(fill='both', expand=True, pady=4)
         self.rim_imgs = [ImageSlot(imgs, self, t) for t in
@@ -501,22 +514,63 @@ class App(tk.Tk):
             return
         roles = (self.roles or {}).get(t['id'], {})
 
-        def shared(key, rel):
+        def shared_rim(key, rel):
             names = [x.get('name') or x['id'] for x in self.teams if x is not t and rel and
                      ((self.roles or {}).get(x['id'], {}).get(key) == rel)]
             return 'Shared with: ' + ', '.join(names) if names else 'Used by this car only'
         for slot, key in zip(self.rim_imgs[:3], ('rim', 'rim_blurred', 'rim_normal')):
             rel = roles.get(key)
-            slot.show(self.pack / rel if rel else None, shared(key, rel) if rel else '')
-        side = roles.get('sidewall') or []
+            slot.show(self.pack / rel if rel else None, shared_rim(key, rel) if rel else '')
+        makers = season_pack.tyre_makers(self.pack)
+        car = season_pack.car_of(self.ents or {'cars': []}, t['id'])
+        # the classic cars' wheels are part of the car model: no tyre maker to choose
+        maker = season_pack.tyre_maker_of(car, makers) if car and car.get('field65') else None
+        self.maker_box['values'] = list(makers)
+        self.maker_box.configure(state='readonly' if maker else 'disabled')
+        self.maker_var.set(maker or '')
+        # the sidewall set the car names now (the tyre maker can change after the template)
+        side = [Path(f).relative_to(self.pack).as_posix() for f in season_pack.sidewall_files(self.pack, makers[maker])] \
+            if maker in makers else roles.get('sidewall') or []
+        users = [x.get('name') or x['id'] for x in self.teams if x is not t and maker and
+                 season_pack.tyre_maker_of(season_pack.car_of(self.ents, x['id']) or {}, makers) == maker]
         tread = roles.get('tread') or []
         pick = lambda files, word: next((f for f in files if word in f.lower()), files[0] if files else None)  # noqa
         s0 = pick(side, 'blur0')
         self.rim_imgs[3].show(self.pack / s0 if s0 else None,
-                              f'{len(side)} versions (Blur0-3); ' + shared('sidewall', side) if side else '')
+                              f'{len(side)} versions (Blur0-3); ' +
+                              (f'Shared with: {", ".join(users)}' if users else 'Used by this car only') if side else '')
         for slot, word in ((self.rim_imgs[4], 'dry_blur0_ca'), (self.rim_imgs[5], 'wet_blur0_ca')):
             f = next((x for x in tread if word in x.lower()), None)
             slot.show(self.pack / f if f else None, 'shared by every car' if f else '')
+
+    def set_maker(self):
+        t = self.cur(self.rim_list, self.teams)
+        car = season_pack.car_of(self.ents or {'cars': []}, t['id']) if t else None
+        if car is None:
+            return
+        makers = season_pack.tyre_makers(self.pack)
+        if self.maker_var.get() in makers and season_pack.tyre_maker_of(car, makers) != self.maker_var.get():
+            season_pack.set_tyre_maker(car, makers, self.maker_var.get())
+            self.log(f'{t.get("name") or t["id"]}: tyre maker {self.maker_var.get()} (Save and Build to apply)')
+        self.show_rims()
+
+    def new_maker(self):
+        if not self.pack or self.kind != 'season':
+            return
+        name = self.ask_name('New tyre maker', 'Tyre maker name:')
+        if not name:
+            return
+        like = self.maker_var.get() if self.maker_var.get() in season_pack.TYRE_MAKERS else 'Bridgestone'
+        try:
+            made = season_pack.new_tyre_maker(self.pack, name, like)
+        except ValueError as e:
+            messagebox.showerror('Content Manager', str(e))
+            return
+        self.log(f'tyre maker {name}: {len(made)} sidewall pictures copied from {like} into WHEELS/SideWalls '
+                 f'({made[0].name} ... ; Blur1-3 are drawn as the wheels spin faster). Paint them, choose the maker '
+                 f'for the teams, then Save and Build')
+        self.maker_var.set(name)
+        self.set_maker()
 
     def show_driver(self):
         self.store_forms()
@@ -646,12 +700,12 @@ class App(tk.Tk):
             pass
         self.after(100, self._poll)
 
-    def ask_name(self, title):
+    def ask_name(self, title, label='Folder name:'):
         win = tk.Toplevel(self)
         win.title(title)
         win.transient(self)
         v = tk.StringVar()
-        ttk.Label(win, text='Folder name:', padding=8).pack(side='left')
+        ttk.Label(win, text=label, padding=8).pack(side='left')
         e = ttk.Entry(win, textvariable=v, width=30)
         e.pack(side='left', padx=4)
         out = []

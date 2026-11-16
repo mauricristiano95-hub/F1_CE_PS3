@@ -454,13 +454,17 @@ def cmd_gltf(sg, out_glb, only=None, texture_file=None):
         return len(accessors) - 1
 
     def png(tname):
-        """The PNG of a texture node (relative URI), written on first use; None when not embedded/decodable."""
+        """The PNG of a texture node (relative URI), written on first use; None when not embedded/decodable and
+        texture_file has no existing PNG for it (the wheels name their swapped textures without embedding them)."""
         t = texs.get(tname)
-        if t is None or t.gtf is None or t.gtf.cube:
+        if t is None or (t.gtf is not None and t.gtf.cube):
             return None
         if t.path not in pngs:
             f = texture_file(t) if texture_file else None
             if f is None or not Path(f).exists():
+                if t.gtf is None:
+                    pngs[t.path] = None
+                    return None
                 f = Path(f or tex_dir / safe_path(t.path).with_suffix('.png'))
                 try:
                     w, h, px = gtf.decode_level(t.gtf)

@@ -4,6 +4,7 @@ the runtime overrides (runtime/mods.cpp). The original game files are only read.
   python -I tools/season_pack.py template <USRDIR> <MODS/pack> [--models]
   python -I tools/season_pack.py helmets <USRDIR> <PLAYER_HELMETS/pack>
   python -I tools/season_pack.py build <USRDIR> <MODS/pack | PLAYER_HELMETS/pack>
+  python -I tools/season_pack.py tyremaker <MODS/pack> <name> [--like Bridgestone|Michelin]
 
 template writes (folders named by the database ids: CARS/Honda, DRIVERS/jbutton, ...)
   pack.ini                          name and description shown by the launcher / Content Manager
@@ -36,6 +37,13 @@ template writes (folders named by the database ids: CARS/Honda, DRIVERS/jbutton,
                                     rims in the database, several cars share some (Alloy_Default: Honda, MF1, Super
                                     Aguri): template.json "teams" lists each team's
   WHEELS/SideWalls/*.png, Tred/     tyre sidewalls (per tyre maker: _BS Bridgestone, _M Michelin) and treads
+                                    the tyre maker of a car = its sidewall set, entities.json cars field68
+                                    (Models/TextureSwaps/Wheels/SideWalls/<set>); tyremaker starts a custom maker:
+                                    <name>_SideWall_Blur0-3.png (a copy of a maker's set to paint; Blur1-3 are the
+                                    spinning versions, a missing one uses Blur0), added to the game by build
+  WHEELS/model/Wheels.obj, .glb     with --models: the tyres and rims every car uses (lod0-2, punctured rims not
+                                    exported), using the WHEELS/ PNGs; build imports edited ones like the cars'
+  WHEELS/model/Wheels_Garage.*      the garage / menu car's wheels (stream.wad wheels_fe.sg), edited separately
   CREW/<team>/*.png                 pit crew overalls and textures
   COUNTRIES/<country>/*.png         flag, driver select picture (used for custom drivers)
   UI/<path>.png                     the other menu, HUD and TV overlay images whose paths are known
@@ -59,6 +67,8 @@ same name used as it is, i.e. upside down; any size, encoded in the original's f
   CARS/<team>/stream.wad/Models/<Model>/<Model>_fe.sg     garage / menu model, when it embeds the texture too or
                                                           the OBJ changed parts it shares with the race model
   <folder>/<archive>.wad/<path>                           stand-alone textures, in every archive that has a copy
+                                                          (and the custom tyre makers' new sidewall textures)
+  WHEELS/model/<archive>.wad/models/wheels/...            edited wheel models
                                                           (PlayerNN/offline.wad/... in a helmet pack)
   DATABASE/offline.wad/entities.bin                       (the game reads offline.wad's copy, not update.wad's)
   DATABASE/offline.wad/dynamics.bin                       (likewise)
@@ -93,6 +103,21 @@ HELMET_MODELS = ([('offline.wad', f'Animations/Driver/Helmet/{n}.sg') for n in
                  [('offline.wad', f'Animations/Driver/Classics/{c}/Head.sg') for c in
                   ['Lotus49c', 'Lotus72e', 'AlfaRomeo158', 'CooperClimax', 'HondaRA272', 'RenaultRS01', 'WilliamsFW06',
                    'WilliamsFW18']])
+# tyre makers: a car names its sidewall texture set in entities.json cars field68 (the game adds _Blur0-3.gtf, the
+# higher numbers drawn as the wheel spins faster); a custom maker is a set WHEELS/SideWalls/<name>_SideWall_Blur0-3
+# made in the pack (new_tyre_maker), which build adds to the archives. The sidewall normal map has no lettering.
+SIDEWALLS = 'Models/TextureSwaps/Wheels/SideWalls/'
+TYRE_MAKERS = {'Bridgestone': 'Default_SideWall_BS', 'Michelin': 'Default_SideWall_M'}
+SIDEWALL_LEVELS = 4
+# the tyre models every car uses (entities cars field65 / field73): pack path stem, the meshes exported
+WHEEL_MODELS = [('offline.wad', 'models/wheels/wheels.sg', 'WHEELS/model/Wheels', {'lod0', 'lod1', 'lod2'}),
+                ('stream.wad', 'models/wheels/wheels_fe.sg', 'WHEELS/model/Wheels_Garage', None)]
+# wheel model texture names -> pack PNG stems (the models name the swapped textures by their source files)
+WHEEL_TEXTURE_ALIASES = {'wheels_tyrewall_bs_blur0': 'default_sidewall_bs_blur0',
+                         'default_tyretred_dry_ca': 'default_tyretred_dry_blur0_ca',
+                         'default_tyretred_dry_s': 'default_tyretred_dry_blur0_s',
+                         'default_tyretred_dry_n': 'default_tyretred_dry_blur0_n',
+                         'wheels_tyretred_dry_n': 'default_tyretred_dry_blur0_n'}
 POINTS_TXT = '''# Points of 1st, 2nd, 3rd ... (up to 22 places; places not listed score nothing). The game reads this file
 # itself when the season pack is selected; the original system is 10 8 6 5 4 3 2 1. Example (2010): 25 18 15 12 10 8 6 4 2 1
 10 8 6 5 4 3 2 1
@@ -149,9 +174,14 @@ def livery_roles(game, team, model):
     return roles
 
 
+def car_of(ents, team):
+    """A team's car record in entities.json (Honda -> Honda2006; the classics share the team id)."""
+    return next((c for c in ents['cars'] if c['id'] in (team + '2006', team)), None)
+
+
 def wheel_roles(ents, team, files):
     """The wheel files a team's car names (entities cars: rims colour / normal, tyre sidewall and tread)."""
-    car = next((c for c in ents['cars'] if c['id'] in (team + '2006', team)), None)
+    car = car_of(ents, team)
     if car is None:
         return {}
     def rel_of(p):
@@ -174,6 +204,64 @@ def wheel_roles(ents, team, files):
             stem = base.rsplit('.', 1)[0].lower()
             out[key] = sorted(f for f in files if f.lower().startswith(stem))
     return out
+
+
+def tyre_makers(pack):
+    """{maker name: sidewall prefix}: the game's two and the custom sets in the pack's WHEELS/SideWalls."""
+    out = dict(TYRE_MAKERS)
+    builtin = {p.lower() for p in TYRE_MAKERS.values()}
+    for f in sorted((Path(pack) / 'WHEELS' / 'SideWalls').glob('*_SideWall_Blur0.*')):
+        prefix = f.stem[:-len('_Blur0')]
+        if prefix.lower() not in builtin and f.suffix.lower() in ('.png', '.dds'):
+            out.setdefault(prefix[:-len('_SideWall')], prefix)
+    return out
+
+
+def tyre_maker_of(car, makers):
+    """The maker name of a car's sidewalls (its prefix when no maker has it), None when the car names none."""
+    prefix = (car.get('field68') or '').replace('\\', '/').split('/')[-1]
+    return next((n for n, p in makers.items() if p.lower() == prefix.lower()), prefix or None)
+
+
+def set_tyre_maker(car, makers, name):
+    car['field68'] = SIDEWALLS + makers[name]
+
+
+def sidewall_files(pack, prefix):
+    """The pack's PNGs of a sidewall set (Blur0 first)."""
+    return sorted((Path(pack) / 'WHEELS' / 'SideWalls').glob(f'{prefix}_Blur?.png'))
+
+
+def new_tyre_maker(pack, name, like='Bridgestone'):
+    """Starts a custom maker: a copy of a maker's sidewall PNGs as WHEELS/SideWalls/<name>_SideWall_Blur0-3.png."""
+    if not name or not all(c.isalnum() or c in '_-' for c in name):
+        raise ValueError('tyre maker names: letters, digits, _ and - only')
+    makers = tyre_makers(pack)
+    if name.lower() in (n.lower() for n in makers):
+        raise ValueError(f'tyre maker {name} exists already')
+    src = Path(pack) / 'WHEELS' / 'SideWalls'
+    made = []
+    for n in range(SIDEWALL_LEVELS):
+        f = src / f'{makers[like]}_Blur{n}.png'
+        if not f.exists():
+            raise ValueError(f'{f} is missing: create the pack again')
+        made.append(src / f'{name}_SideWall_Blur{n}.png')
+        made[-1].write_bytes(f.read_bytes())
+    return made
+
+
+def wheel_texture_png(pack, t):
+    """The pack PNG a wheel model texture shows (rims, sidewalls, treads from WHEELS/), else None."""
+    stem = tex_stem(t.path)
+    stem = WHEEL_TEXTURE_ALIASES.get(stem, stem)
+    return next((p for p in (Path(pack) / 'WHEELS').rglob('*.png') if p.stem.lower() == stem
+                 and 'model' not in p.parts), None)
+
+
+def car_texture_png(livery, t):
+    """The pack livery PNG of a car model texture (the embedded textures/... ones), else None."""
+    f = livery / f'{tex_stem(t.path)}.png'
+    return f if t.path.replace('\\', '/').lower().startswith('textures/') and f.exists() else None
 
 
 def used_in(rel, targets, roles=None):
@@ -350,9 +438,8 @@ def cmd_template(usrdir, pack, models):
             sg.cmd_obj(game.scene("offline.wad", f"Models/{model}/CarParts.sg"), mdir / f'{team}.obj',
                        {'lod0'})
             models_written[f'CARS/{team}/model/{team}.obj'] = ['offline.wad', f'Models/{model}/CarParts.sg']
-            # the glTF (both UV sets) uses the livery PNGs themselves: written after them
             gltf_jobs.append((('offline.wad', f'Models/{model}/CarParts.sg'), f'CARS/{team}/model/{team}.glb',
-                              {'lod0'}, pack / 'CARS' / team / 'livery'))
+                              {'lod0'}, functools.partial(car_texture_png, pack / 'CARS' / team / 'livery')))
     progress(len(TEAMS), len(TEAMS), 'car models read')
     found = standalone_sources(game, ents)
     for rel, targets in found.items():
@@ -376,15 +463,22 @@ def cmd_template(usrdir, pack, models):
             sg.cmd_obj(game.scene(archive, path), pack / rel)
             models_written[rel] = [archive, path]
             gltf_jobs.append(((archive, path), rel[:-4] + '.glb', None, None))
+        log('Tyres: exporting the wheel models')
+        # shared by every car; the rims, sidewalls and treads are the WHEELS/ textures each car names
+        for archive, path, stem, only in WHEEL_MODELS:
+            if game.scene(archive, path) is None:
+                continue
+            (pack / stem).parent.mkdir(parents=True, exist_ok=True)
+            sg.cmd_obj(game.scene(archive, path), pack / f'{stem}.obj', only)
+            models_written[f'{stem}.obj'] = [archive, path]
+            gltf_jobs.append(((archive, path), f'{stem}.glb', only, functools.partial(wheel_texture_png, pack)))
     manifest = {'files': {}, 'built': [], 'teams': team_roles}
     write_images(pack, sources, game, manifest)
     if gltf_jobs:
         log('Exporting glTF models (both UV sets, for Blender)')
-    for (archive, path), rel, only, livery in gltf_jobs:
-        stem = lambda t: tex_stem(t.path)  # noqa: E731
-        car_png = (lambda t: livery / f'{stem(t)}.png' if t.path.replace('\\', '/').lower().startswith('textures/')
-                   and (livery / f'{stem(t)}.png').exists() else None) if livery else None
-        sg.cmd_gltf(game.scene(archive, path), pack / rel, only, texture_file=car_png)
+    # the glTF files use the pack's PNGs themselves: written after them
+    for (archive, path), rel, only, texture_file in gltf_jobs:
+        sg.cmd_gltf(game.scene(archive, path), pack / rel, only, texture_file=texture_file)
         models_written[rel] = [archive, path]
     manifest['models'] = {rel: {'sha1': sha1(pack / rel), 'target': t} for rel, t in models_written.items()}
     for rel, info in manifest['files'].items():
@@ -510,6 +604,7 @@ def cmd_build(usrdir, pack):
         if key in sg_changes:
             data = sg.replace_textures(data, sg_changes[key])
         outputs[f'{group}/{archive}/{path}'] = data
+    generated = build_tyre_makers(game, pack, manifest.get('generated', {}), outputs)
     db = pack / 'DATABASE' / 'entities.json'
     if db.exists() and sha1(db) != manifest.get('database'):
         ents = entities.parse(game.get('offline.wad', 'entities.bin'))
@@ -534,8 +629,46 @@ def cmd_build(usrdir, pack):
         p.write_bytes(data)
         print(f'{rel}: built ({len(data)} bytes)')
     manifest['built'] = sorted(outputs)
+    manifest['generated'] = generated
     (pack / 'template.json').write_text(json.dumps(manifest, indent=1), newline='\n')
     print(f'{pack}: {len(outputs)} game file(s)')
+
+
+def build_tyre_makers(game, pack, generated, outputs):
+    """The custom tyre makers' sidewall sets as new entries of every archive holding the original sets (encoded like
+    the Bridgestone level of the same number; a missing level uses Blur0). Encoding is slow: a level whose PNG did
+    not change since the last build keeps its built file. Returns {output: source checksum} for the next build."""
+    makers = tyre_makers(pack)
+    used = {}
+    ents = pack / 'DATABASE' / 'entities.json'
+    for car in json.loads(ents.read_text(encoding='utf-8')).get('cars', []) if ents.exists() else []:
+        if car.get('field68') and car.get('field65'):     # the classic cars' wheels are part of the car model
+            used.setdefault(tyre_maker_of(car, makers), []).append(car['id'])
+    for name, cars in used.items():
+        if name not in makers:
+            print(f'WARNING: {", ".join(cars)}: tyre maker {name} has no WHEELS/SideWalls/{name}_Blur0-3 files '
+                  f'(the game would have no sidewall texture)')
+    out = {}
+    for name, prefix in makers.items():
+        if name in TYRE_MAKERS:
+            continue
+        files = {int(f.stem[-1]): f for f in sidewall_files(pack, prefix)}
+        for n in range(SIDEWALL_LEVELS):
+            src = files.get(n, files[0])
+            like = f'{SIDEWALLS}{TYRE_MAKERS["Bridgestone"]}_Blur{n}.gtf'
+            data = None
+            for archive in game.where(like):
+                rel = f'WHEELS/SideWalls/{archive}/{SIDEWALLS}{prefix}_Blur{n}.gtf'
+                if data is None and generated.get(rel) == sha1(src) and (pack / rel).exists():
+                    data = (pack / rel).read_bytes()
+                if data is None:
+                    data = sg.texture_from_file(src, gtf.Gtf(game.get(archive, like)), flip=True)
+                outputs[rel] = data
+                out[rel] = sha1(src)
+        print(f'tyre maker {name}: {SIDEWALL_LEVELS} sidewall textures' +
+              (f' (Blur{", Blur".join(str(n) for n in range(SIDEWALL_LEVELS) if n not in files)} from Blur0)'
+               if len(files) < SIDEWALL_LEVELS else ''))
+    return out
 
 
 def main(argv):
@@ -547,6 +680,10 @@ def main(argv):
         cmd_helmets(argv[1], argv[2])
     elif argv[0] == 'build':
         cmd_build(argv[1], argv[2])
+    elif argv[0] == 'tyremaker':
+        like = argv[argv.index('--like') + 1] if '--like' in argv else 'Bridgestone'
+        for f in new_tyre_maker(argv[1], argv[2], like):
+            print(f)
     else:
         print(__doc__); return 1
     return 0
