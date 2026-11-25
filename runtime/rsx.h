@@ -28,7 +28,8 @@ extern bool g_plain[0x800];      // methods below 0x2000 that only store their v
 // that takes them in bulk (else null: one method call per word)
 extern void (*g_upload_words)(u32 method, const u32* args, u32 n, bool non_inc);
 // profiling of the FIFO front end (hle_gcm.cpp) and whole draws/clears, reported with the renderer's perf line (us, counts)
-struct FrontProf { u64 t_sem = 0, t_flip = 0, t_draw = 0, t_clear = 0, cmds = 0, words = 0, entries = 0, nops = 0, flows = 0; };
+struct FrontProf { u64 t_sem = 0, t_flip = 0, t_draw = 0, t_clear = 0, cmds = 0, words = 0, entries = 0, nops = 0, flows = 0;
+                   u64 t_drain = 0, drains = 0, t_render_idle = 0; };   // (render queue: parser waits, renderer idle)
 extern FrontProf g_fe;
 void init();
 void method(u32 method, u32 arg);                               // NV4097 state / draw methods

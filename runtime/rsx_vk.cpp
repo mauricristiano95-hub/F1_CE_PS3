@@ -2982,6 +2982,9 @@ void flip(u32 ea, u32 pitch, u32 width, u32 height) {
             LOG_I("perf front: ms draw calls %.2f (attributes %.2f params+pass %.2f) clears %.2f flip %.2f semaphore waits %.2f | %.0f commands %.0f words, %.0f slow entries (%.0f nops %.0f flow)",
                   g_fe.t_draw / nf / 1e3, g_prof.t_pre / nf / 1e3, g_prof.t_bind / nf / 1e3, g_fe.t_clear / nf / 1e3, g_fe.t_flip / nf / 1e3,
                   g_fe.t_sem / nf / 1e3, g_fe.cmds / nf, g_fe.words / nf, g_fe.entries / nf, g_fe.nops / nf, g_fe.flows / nf);
+            if (g_fe.drains || g_fe.t_render_idle)
+                LOG_I("perf queue: parser waited %.2f ms in %.0f drains, renderer idle %.2f ms per frame", g_fe.t_drain / nf / 1e3,
+                      g_fe.drains / nf, g_fe.t_render_idle / nf / 1e3);
             if (g_ts_ok) {   // near 100% busy: the GPU sets the frame rate
                 LOG_I("perf gpu: busy %.1f ms per frame (%.0f%% of the time), longest submission %.1f ms", g_gpu_busy_ns / nf / 1e6,
                       g_gpu_busy_ns / 10.0 / wall, g_gpu_max_ns / 1e6);

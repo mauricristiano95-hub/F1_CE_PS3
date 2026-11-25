@@ -152,15 +152,7 @@ void sleep_usec(u64 us) {
     std::this_thread::sleep_for(std::chrono::microseconds(us));
 }
 // ---- blocking waits on guest memory lines (ppu_runtime.h)
-namespace {
-struct alignas(64) LineSlot {
-    std::atomic<u32> line0{~0u}, line1{~0u};
-    std::atomic<u32> seq{0};
-    std::atomic<u32> sleeping{0};
-};
-LineSlot g_line_slots[16];
-std::atomic<u32> g_line_slots_used{0};   // high-water mark: guest_written_slow scans slots below it
-std::atomic<u32> g_line_slots_taken{0};  // bit per slot owned by a live thread
+// (also the render queue, hle_gcm.cpp)
 void futex_wait(std::atomic<u32>* a, u32 expected, u32 timeout_ms) {
 #ifdef _WIN32
     WaitOnAddress((volatile void*)a, &expected, sizeof(u32), timeout_ms);
@@ -176,6 +168,15 @@ void futex_wake_all(std::atomic<u32>* a) {
     syscall(SYS_futex, (u32*)a, FUTEX_WAKE_PRIVATE, 0x7fffffff, nullptr, nullptr, 0);
 #endif
 }
+namespace {
+struct alignas(64) LineSlot {
+    std::atomic<u32> line0{~0u}, line1{~0u};
+    std::atomic<u32> seq{0};
+    std::atomic<u32> sleeping{0};
+};
+LineSlot g_line_slots[16];
+std::atomic<u32> g_line_slots_used{0};   // high-water mark: guest_written_slow scans slots below it
+std::atomic<u32> g_line_slots_taken{0};  // bit per slot owned by a live thread
 }  // namespace
 std::atomic<u32> g_line_waiters{0};
 

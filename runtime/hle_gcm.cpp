@@ -17,6 +17,8 @@ void set_thread_name(const char* name);   // core.cpp
 
 namespace rsx { u64 g_last_frame_draws = 0; }
 void spurs_watchdog_report();   // hle_spurs.cpp
+void futex_wait(std::atomic<u32>* a, u32 expected, u32 timeout_ms);   // core.cpp
+void futex_wake_all(std::atomic<u32>* a);
 std::string profile_main_between(u64 t0, u64 t1);   // core.cpp
 bool shake_filter_on();   // hle_physics.cpp
 void log_thread_cpu();    // core.cpp
@@ -377,6 +379,134 @@ void do_flip(u32 id) {
     raise_interrupt(g.flip_handler, 1);
 }
 
+// ------------------------------------------------------------------ render queue (F1CE_FIFO_THREAD)
+// The FIFO is parsed on its own thread ("rsx parse": the loop below, rsx_parse) and the renderer's work (register
+// writes, draws, vertex program uploads, reports, flips) runs on the RSX thread in the same order, through this single
+// producer / single consumer queue: parsing (~10% of the renderer thread's time at a race start) overlaps the draws.
+// Everything the game can see stays ordered after the work before it: the front end's own writes (reference,
+// semaphore releases) wait until the renderer has run every queued command (rq_drain, in flush_pending), so the game
+// never takes "RSX done" for commands whose vertex, index or texture data the renderer has not read yet; acquires wait
+// the same way. The parser publishes its position in batches (a store per command bounced the line between the two
+// threads). F1CE_FIFO_THREAD=0: one thread as before (the queue calls run the renderer at once).
+constexpr u32 GCM_FLIP_COMMAND_RQ = 0xFEAC;
+void do_flip(u32 id);
+bool g_rq_on = false;
+struct RqOp { u32 m, a; };
+constexpr u32 RQ_N = 1u << 16;
+constexpr u32 RQ_UPLOAD = 0x80000000u, RQ_NONINC = 0x40000000u;   // header: method | flags, word count; the words follow
+RqOp g_rq[RQ_N];
+alignas(64) std::atomic<u32> g_rq_head{0};   // published by the parser
+alignas(64) std::atomic<u32> g_rq_tail{0};   // run up to here by the renderer
+alignas(64) std::atomic<u32> g_rq_render_sleeps{0};
+alignas(64) std::atomic<u32> g_rq_parse_waits{0};
+u32 g_rq_pos = 0, g_rq_commit = 0, g_rq_seen_tail = 0;   // (parser side; commit: the end of the last whole op)
+
+// the renderer's part of one command word (the RSX thread, or the parser itself without the queue)
+void render_method(u32 m, u32 arg) {
+    if (m < 0x2000 && rsx::g_plain_on && rsx::g_plain[m >> 2]) { rsx::R[m >> 2] = arg; return; }
+    switch (m) {
+        case 0x1800: {                                                          // NV4097_GET_REPORT
+            u32 a = mem::RSX_LOCAL + 0x0E000000 + (arg & 0xFFFFFF);
+            st64(a, ppu_timebase() * 1000 / 80);
+            if (!rsx::report(arg >> 24, a)) st32(a + 8, 0);
+            st32(a + 12, 0);
+            break;
+        }
+        case GCM_FLIP_COMMAND_RQ: { u64 t = prof_usec(); do_flip(arg); rsx::g_fe.t_flip += prof_usec() - t; break; }
+        default: rsx::method(m, arg); break;
+    }
+}
+void render_upload(u32 m, const u32* w, u32 n, bool non_inc) {
+    if (const auto upload = rsx::g_upload_words) { upload(m, w, n, non_inc); return; }
+    for (u32 i = 0; i < n; i++) render_method(non_inc ? m : m + i * 4, w[i]);
+}
+
+void rq_publish() {   // (whole ops only: an upload's header is never published without its words)
+    if (!g_rq_on || g_rq_head.load(std::memory_order_relaxed) == g_rq_commit) return;
+    g_rq_head.store(g_rq_commit, std::memory_order_seq_cst);
+    if (g_rq_render_sleeps.load(std::memory_order_seq_cst)) futex_wake_all(&g_rq_head);
+}
+// until the renderer has run up to `upto`
+void rq_wait_tail(u32 upto) {
+    for (u32 spins = 0;; spins++) {
+        const u32 t = g_rq_tail.load(std::memory_order_acquire);
+        g_rq_seen_tail = t;
+        if ((s32)(t - upto) >= 0) return;
+        if (spins < 200) { _mm_pause(); continue; }
+        g_rq_parse_waits.store(1, std::memory_order_seq_cst);
+        if ((s32)(g_rq_tail.load(std::memory_order_seq_cst) - upto) < 0) futex_wait(&g_rq_tail, t, 1);
+        g_rq_parse_waits.store(0, std::memory_order_relaxed);
+    }
+}
+void rq_drain() {
+    if (!g_rq_on) return;
+    rq_publish();
+    if (g_rq_seen_tail != g_rq_pos) {
+        const u64 t = prof_usec();
+        rq_wait_tail(g_rq_pos);
+        rsx::g_fe.t_drain += prof_usec() - t;
+        rsx::g_fe.drains++;
+    }
+}
+FORCE_INLINE void rq_put(u32 m, u32 a) {
+    if (g_rq_pos - g_rq_seen_tail >= RQ_N) {   // full: wait for room (an op is at most 2049 entries)
+        rq_publish();
+        rq_wait_tail(g_rq_pos - RQ_N + 4096);
+    }
+    g_rq[g_rq_pos++ & (RQ_N - 1)] = {m, a};
+}
+FORCE_INLINE void rq_end_op() {
+    g_rq_commit = g_rq_pos;
+    if (g_rq_commit - g_rq_head.load(std::memory_order_relaxed) >= 512) rq_publish();
+}
+void rq_method(u32 m, u32 a) {
+    if (!g_rq_on) { render_method(m, a); return; }
+    rq_put(m, a);
+    rq_end_op();
+}
+void rq_upload(u32 m, const u32* w, u32 n, bool non_inc) {
+    if (!g_rq_on) { render_upload(m, w, n, non_inc); return; }
+    rq_put(m | RQ_UPLOAD | (non_inc ? RQ_NONINC : 0), n);
+    for (u32 i = 0; i < n; i++) rq_put(0, w[i]);
+    rq_end_op();
+}
+
+// the RSX thread with the queue: runs what the parser publishes; while there is nothing, the renderer's lazy reports
+// (zpass_service) are written, as the front end's idle loop did before
+void render_loop() {
+    static u32 words[2048];
+    u32 t = 0;
+    for (;;) {
+        u32 h = g_rq_head.load(std::memory_order_acquire);
+        if (h == t) {
+            rsx::zpass_service();
+            const u64 w0 = time_usec();
+            for (u32 spins = 0; h == t; spins++) {
+                if (spins < 2000) { _mm_pause(); h = g_rq_head.load(std::memory_order_acquire); continue; }
+                g_rq_render_sleeps.store(1, std::memory_order_seq_cst);
+                h = g_rq_head.load(std::memory_order_seq_cst);
+                if (h == t) futex_wait(&g_rq_head, t, 1);
+                g_rq_render_sleeps.store(0, std::memory_order_relaxed);
+                h = g_rq_head.load(std::memory_order_acquire);
+                if (h == t) rsx::zpass_service();
+            }
+            rsx::g_fe.t_render_idle += time_usec() - w0;
+        }
+        while (t != h) {
+            const RqOp op = g_rq[t++ & (RQ_N - 1)];
+            if (op.m & RQ_UPLOAD) {
+                for (u32 i = 0; i < op.a; i++) words[i] = g_rq[(t + i) & (RQ_N - 1)].a;
+                t += op.a;
+                render_upload(op.m & 0xFFFF, words, op.a, op.m & RQ_NONINC);
+            } else {
+                render_method(op.m, op.a);
+            }
+        }
+        g_rq_tail.store(t, std::memory_order_seq_cst);
+        if (g_rq_parse_waits.load(std::memory_order_seq_cst)) futex_wake_all(&g_rq_tail);
+    }
+}
+
 // Synchronisation writes (reference, semaphore releases) become visible only after the next command has been
 // fetched, as with the RSX's command prefetch: the game reuses (clears) a command list as soon as the RSX releases
 // it, and reading the list's closing RET/JUMP after the release found zeros, ran on through them into stale data and
@@ -385,6 +515,8 @@ struct PendingWrite { u32 addr, val; };
 PendingWrite g_pending[16];
 u32 g_npending = 0;
 void flush_pending() {
+    if (!g_npending) return;
+    rq_drain();   // (after the renderer has run every command before them)
     for (u32 i = 0; i < g_npending; i++) { st32(g_pending[i].addr, g_pending[i].val); guest_written(g_pending[i].addr, 4); }
     g_npending = 0;
 }
@@ -400,6 +532,7 @@ void set_get(u32 v) { st32(g.control_addr + 4, v); g_my_get = v; guest_written(g
 // GET at the command being run, before one that may wait for the PPU (runs of commands write it only at their end)
 void sync_get() { if (g_my_get != g_cur_get) set_get(g_cur_get); }
 
+// the front end's own methods (the parser thread); everything else goes to the renderer (rq_method)
 void exec_method(u32 method, u32 arg) {
     switch (method) {
         case 0x0050: defer_st32(g.control_addr + 8, arg); g_front_ref = arg; break;   // NV406E_SET_REFERENCE
@@ -407,6 +540,7 @@ void exec_method(u32 method, u32 arg) {
         case 0x0068: {                                                  // NV406E_SEMAPHORE_ACQUIRE
             sync_get();
             flush_pending();   // the game may wait for our earlier releases before releasing this one
+            rq_drain();        // or for a report or a flip of the renderer's
             u32 a = label_ptr(rsx_state.sem_offset_406e);
             u64 start = time_usec();
             u32 before = ld32(a);
@@ -424,7 +558,9 @@ void exec_method(u32 method, u32 arg) {
                 }
                 if (old_spin) { std::this_thread::yield(); continue; }
                 if (now - start < 30) { for (int i = 0; i < 16; i++) _mm_pause(); continue; }
-                rsx::zpass_service();   // (the PPU may be waiting for a report before it releases this)
+                // (the PPU may be waiting for a report before it releases this: with the queue the renderer writes
+                // them while it has nothing to run)
+                if (!g_rq_on) rsx::zpass_service();
                 if (!lw.armed) { line_wait_arm(lw, a, a); continue; }
                 (line_wait_block(lw, 1) ? woken : timeouts)++;
             }
@@ -449,35 +585,28 @@ void exec_method(u32 method, u32 arg) {
             defer_st32(label_ptr(rsx_state.sem_offset_4097), (arg & 0xFF00FF00) | ((arg & 0xFF) << 16) | ((arg >> 16) & 0xFF));
             break;
         case 0x1D74: defer_st32(label_ptr(rsx_state.sem_offset_4097), arg); break;   // TEXTURE_READ_SEMAPHORE_RELEASE
-        case 0x1800: {                                                          // NV4097_GET_REPORT
-            u32 a = mem::RSX_LOCAL + 0x0E000000 + (arg & 0xFFFFFF);
-            st64(a, ppu_timebase() * 1000 / 80);
-            if (!rsx::report(arg >> 24, a)) st32(a + 8, 0);
-            st32(a + 12, 0);
-            break;
-        }
-        case GCM_FLIP_COMMAND: { sync_get(); u64 t = prof_usec(); do_flip(arg); rsx::g_fe.t_flip += prof_usec() - t; break; }
-        default: rsx::method(method, arg); break;
+        case GCM_FLIP_COMMAND_RQ: sync_get(); rq_method(method, arg); break;   // (GET first: the flip may wait for the PPU)
+        default: rq_method(method, arg); break;
     }
 }
 
-// the arguments of one command. Most are register writes: with a renderer that says so, they skip the calls above
+// the arguments of one command: the front end's methods here, the rest to the renderer (register writes, vertex
+// program words a run at a time)
 FORCE_INLINE void exec_command(u32 method, bool non_inc, const u32* args, u32 count) {
     static const auto front = [] {   // the methods exec_method handles itself
         std::array<bool, 0x800> t{};
-        for (u32 x : {0x0050u, 0x0064u, 0x0068u, 0x006Cu, 0x1D6Cu, 0x1D70u, 0x1D74u, 0x1800u}) t[x >> 2] = true;
+        for (u32 x : {0x0050u, 0x0064u, 0x0068u, 0x006Cu, 0x1D6Cu, 0x1D70u, 0x1D74u}) t[x >> 2] = true;
         return t;
     }();
-    const bool plain = rsx::g_plain_on;
-    const auto upload = rsx::g_upload_words;
     for (u32 i = 0; i < count; i++) {
         const u32 m = non_inc ? method : method + i * 4;
-        if (plain && m < 0x2000 && rsx::g_plain[m >> 2] && !front[m >> 2]) rsx::R[m >> 2] = args[i];
-        else if (upload && (m - 0x0B80u < 0x80 || m - 0x1F00u < 0x80)) {   // vertex program words: the rest of the run at once
+        if (m < 0x2000 && front[m >> 2]) exec_method(m, args[i]);
+        else if (m - 0x0B80u < 0x80 || m - 0x1F00u < 0x80) {   // vertex program words: the rest of the run at once
             const u32 n = non_inc ? count - i : std::min(count - i, ((m & ~0x7Fu) + 0x80 - m) / 4);
-            upload(m, args + i, n, non_inc);
+            rq_upload(m, args + i, n, non_inc);
             i += n - 1;
-        } else exec_method(m, args[i]);
+        } else if (m == GCM_FLIP_COMMAND_RQ) exec_method(m, args[i]);
+        else rq_method(m, args[i]);
     }
 }
 
@@ -793,10 +922,11 @@ FORCE_INLINE void count_nop(u32 get) {
     }
 }
 
-void rsx_thread() {
-    set_thread_name("rsx");
-    place_thread(0);
-    if (getenv("F1CE_HOST_PROFILE_RSX")) profile_register_thread();
+void rsx_parse() {
+    if (g_rq_on) {
+        set_thread_name("rsx parse");
+        if (getenv("F1CE_HOST_PROFILE_RSX")) profile_register_thread();
+    }
     const bool verify = getenv("F1CE_FIFO_VERIFY") != nullptr;
     if (verify) {
         g_verify = new VerifyRec[VERIFY_N]();
@@ -822,7 +952,8 @@ void rsx_thread() {
         }
         if (put == get) {
             flush_pending();
-            rsx::zpass_service();
+            rq_publish();   // (the renderer writes the lazy reports while it has nothing to run)
+            if (!g_rq_on) rsx::zpass_service();
             static u64 idle_since = 0;
             u64 t = time_usec();
             // after 200 us without commands, block until the game writes PUT (probe after its store, put_written) or 1 ms
@@ -1025,7 +1156,21 @@ void rsx_thread() {
             avail -= count + 1;
         }
         set_get(get);
+        rq_publish();   // (at most a burst behind: the renderer must not wait for ops the parser holds)
     }
+}
+
+// The RSX thread: the renderer, fed by the FIFO parser on its own thread through the render queue (F1CE_FIFO_THREAD=0:
+// the parser runs here and calls the renderer directly, as before)
+void rsx_thread() {
+    set_thread_name("rsx");
+    place_thread(0);
+    if (getenv("F1CE_HOST_PROFILE_RSX")) profile_register_thread();
+    g_rq_on = !(getenv("F1CE_FIFO_THREAD") && atoi(getenv("F1CE_FIFO_THREAD")) == 0);
+    LOG_I("rsx: FIFO parsing %s", g_rq_on ? "on its own thread (render queue)" : "on the RSX thread");
+    if (!g_rq_on) { rsx_parse(); return; }
+    std::thread(rsx_parse).detach();
+    render_loop();
 }
 
 void vblank_thread() {
