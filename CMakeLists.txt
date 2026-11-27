@@ -76,6 +76,8 @@ set(RUNTIME_SOURCES
   runtime/hle_physics.cpp
   runtime/hle_handling.cpp
   runtime/hle_ai.cpp
+  runtime/hle_penalties.cpp
+  runtime/hle_mfd.cpp
   runtime/hle_discord.cpp
   runtime/hle_replay.cpp
   runtime/hle_rumble.cpp

@@ -7,6 +7,7 @@ struct PadState {
     u16 digital1 = 0, digital2 = 0;          // CELL_PAD_CTRL_* bit layout
     u16 lx = 0x80, ly = 0x80, rx = 0x80, ry = 0x80;
     u16 pressure[12] = {};
+    u8 gp_dpad = 0, kb_dpad = 0;             // D1_UP/DOWN/LEFT/RIGHT source tracking (hle_mfd.cpp)
 };
 
 void init();

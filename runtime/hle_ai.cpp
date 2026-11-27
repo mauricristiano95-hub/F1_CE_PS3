@@ -37,6 +37,7 @@
 #include <cstring>
 #include <random>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -51,6 +52,7 @@ __attribute__((weak)) void sub_000CB0E4(PPUContext& __restrict c);
 __attribute__((weak)) void sub_0011E7B0(PPUContext& __restrict c);
 __attribute__((weak)) void sub_000E22B0(PPUContext& __restrict c);
 __attribute__((weak)) void sub_00113F90(PPUContext& __restrict c);
+__attribute__((weak)) void sub_0062761C(PPUContext& __restrict c);
 
 namespace {
 
@@ -115,16 +117,16 @@ constexpr TrackCalibration kBalancedTracks[] = {
     {"Nurburgring", "nurburgring", 5066, 3.20f, 3.65f, 1.15f, 1.035f, 0.961f},   // wide track (12.1m), conservative corners
     {"Brazil",      "interlagos",  4221, 3.00f, 3.45f, 1.12f, 1.015f, 0.970f},   // 51% corners < 3.0G
     {"Istanbul",    "istanbul",    5232, 3.00f, 3.45f, 1.12f, 1.015f, 0.976f},   // lowest median G (3.03G)
-    {"Shanghai",    "shanghai",    5348, 3.00f, 3.45f, 1.12f, 1.015f, 0.976f},   // 669m of corners < 2.8G
-    {"Indy",        "indy",        4110, 3.00f, 3.45f, 1.12f, 1.015f, 0.974f},   // 25% corners < 2.5G
-    {"Hockenheim",  "hockenheim",  4526, 2.90f, 3.35f, 1.10f, 1.005f, 0.979f},
-    {"SanMarino",   "imola",       4856, 2.90f, 3.35f, 1.10f, 1.005f, 0.983f},
-    {"Canada",      "montreal",    4283, 2.90f, 3.35f, 1.10f, 1.005f, 0.982f},
-    {"Monaco",      "montecarlo",  3283, 2.85f, 3.25f, 1.08f, 1.000f, 0.986f},   // tight barriers: modest lift
-    {"Malaysia",    "sepang",      5471, 2.90f, 3.35f, 1.10f, 1.000f, 0.983f},
+    {"Shanghai",    "shanghai",    5348, 3.20f, 3.70f, 1.16f, 1.042f, 0.962f},   // 669m of corners < 2.8G (-1.35s extra)
+    {"Indy",        "indy",        4110, 3.00f, 3.45f, 1.12f, 1.040f, 0.963f},   // 25% corners < 2.5G (-0.80s extra)
+    {"Hockenheim",  "hockenheim",  4526, 3.10f, 3.60f, 1.14f, 1.040f, 0.962f},   // (-1.25s extra)
+    {"SanMarino",   "imola",       4856, 3.25f, 3.70f, 1.18f, 1.045f, 0.961f},   // Variante Alta 1.65G, Rivazza 2.29G, Tosa 2.33G
+    {"Canada",      "montreal",    4283, 3.00f, 3.50f, 1.12f, 1.028f, 0.973f},   // (-0.65s extra)
+    {"Monaco",      "montecarlo",  3283, 2.85f, 3.25f, 1.08f, 1.022f, 0.976f},   // tight barriers: safe +2.2% corner lift (-0.75s extra)
+    {"Malaysia",    "sepang",      5471, 3.15f, 3.60f, 1.14f, 1.028f, 0.967f},   // fast sweepers T5/T6/T12/T13 (-1.55s extra)
     {"Silverstone", "silverstone", 5033, 2.90f, 3.35f, 1.10f, 1.000f, 0.987f},
     {"Spain",       "barcelona",   4536, 2.90f, 3.35f, 1.10f, 1.000f, 0.988f},
-    {"Monza",       "monza",       5680, 2.90f, 3.35f, 1.10f, 1.000f, 0.988f},
+    {"Monza",       "monza",       5680, 3.10f, 3.60f, 1.14f, 1.030f, 0.979f},   // (-0.75s extra)
 };
 
 struct Vec3 {
@@ -276,6 +278,11 @@ std::string read_track_stem(u32 track_info) {
     return out;
 }
 
+// Track the exact FakeTimes scale applied per FakeTimes object so career_trial_target_hook (0x62761C)
+// can undo AI pace scaling for solo Career Trial target times without affecting AI Quali/Practice/Race pace.
+std::unordered_map<u32, float> g_fkt_scales;
+float g_last_fkt_scale = 1.0f;
+
 void scale_faketimes(PPUContext& c, u32 fkt_obj, u32 track_info, const PaceConfig& cfg) {
     if (!fkt_obj || !mem::readable(fkt_obj, 792)) return;
     const std::string stem = read_track_stem(track_info);
@@ -294,7 +301,11 @@ void scale_faketimes(PPUContext& c, u32 fkt_obj, u32 track_info, const PaceConfi
         // Corner speed multiplier m moves lap time roughly by 1 / (1 + 0.55 * (m - 1))
         scale = std::clamp(1.0f / (1.0f + 0.55f * (cfg.custom_mult - 1.0f)), 0.85f, 1.20f);
     }
-    if (std::fabs(scale - 1.0f) < 0.001f) return;
+    if (std::fabs(scale - 1.0f) < 0.001f) {
+        g_fkt_scales[fkt_obj] = 1.0f;
+        g_last_fkt_scale = 1.0f;
+        return;
+    }
 
     // FakeTimes object stores 198 sector-time floats (792 bytes = 66 laps x 3 sectors) at +0x000..+0x317;
     // 0x1BFDB0(fkt_obj) rebuilds its derived lookup tables from those 198 floats.
@@ -310,6 +321,8 @@ void scale_faketimes(PPUContext& c, u32 fkt_obj, u32 track_info, const PaceConfi
     c.r[3] = r3;
     c.lr = lr;
     c.cur_fn = fn;
+    g_fkt_scales[fkt_obj] = scale;
+    g_last_fkt_scale = scale;
     LOG_I("ai pace: scaled FakeTimes (%s) by %.3fx", stem.empty() ? "?" : stem.c_str(), scale);
 }
 
@@ -694,18 +707,81 @@ const TyreWearConfig& tyre_wear_config() {
     return cfg;
 }
 
+// Cached per-meter racing-line expected speed profile for the currently loaded track (used by hle_penalties.cpp
+// to measure real time gained when cutting corners and time given back during the 5 s Give Back Time window).
+std::vector<float> g_ref_speed;
+
+void cache_track_ref_speeds(u32 track_data) {
+    g_ref_speed.clear();
+    if (!mem::readable(track_data, 0x100)) return;
+    const u32 seg_ptr = ld32(track_data + 0xEC);
+    const u32 seg_cnt = ld32(track_data + 0xF4);
+    const u32 spline = ld32(track_data + 0x0C);
+    if (!seg_ptr || seg_cnt < 5 || seg_cnt > 2000 || !spline || !mem::readable(spline, 0x20)) return;
+    const u32 n_pts = ld32(spline + 0x0C);
+    if (n_pts < 500 || n_pts > 20000 || !mem::readable(seg_ptr, seg_cnt * 28)) return;
+
+    g_ref_speed.assign(n_pts, 85.0f);
+    for (u32 i = 0; i < seg_cnt; i++) {
+        const u32 s = seg_ptr + i * 28;
+        const float sc = ldf(s);
+        if (!std::isfinite(sc) || sc < 5.0f || sc > 110.0f) continue;
+        const int s_idx = (s16)ld16(s + 0x18);
+        const int e_idx = (s16)ld16(s + 0x1A);
+        int slen = e_idx - s_idx;
+        if (slen < 0) slen += (int)n_pts;
+        if (slen <= 0) slen = 1;
+        if (slen > (int)n_pts) slen = (int)n_pts;
+        for (int k = 0; k < slen; k++) {
+            const size_t idx = (size_t)((s_idx + k) % (int)n_pts);
+            if (sc < g_ref_speed[idx]) g_ref_speed[idx] = sc;
+        }
+    }
+    // Realistic F1 braking/acceleration smoothing along the cached racing-line profile (~38 m/s^2 brake, ~13 m/s^2 accel)
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = (int)n_pts - 1; i >= 0; i--) {
+            const float nxt = g_ref_speed[(size_t)((i + 1) % (int)n_pts)];
+            g_ref_speed[(size_t)i] = std::min(g_ref_speed[(size_t)i], std::sqrt(nxt * nxt + 76.0f));
+        }
+        for (u32 i = 0; i < n_pts; i++) {
+            const float prv = g_ref_speed[(i + n_pts - 1) % n_pts];
+            const float acc = std::max(2.5f, 15.0f - 0.0013f * prv * prv);
+            g_ref_speed[i] = std::min(g_ref_speed[i], std::sqrt(prv * prv + 2.0f * acc));
+        }
+    }
+}
+
 }  // namespace
+
+// Expected racing-line travel time (seconds) between normalized lap progresses p0 -> p1 (0..1, wrap-safe).
+// Returns < 0 if no track profile is cached or the delta is invalid.
+float hle_ai_expected_segment_time(float p0, float p1) {
+    const size_t n = g_ref_speed.size();
+    if (n < 500) return -1.0f;
+    float dp = p1 - p0;
+    if (dp < -0.5f) dp += 1.0f;
+    if (dp <= 0.0f || dp > 0.35f) return -1.0f;
+    const int i0 = ((int)std::floor(p0 * (float)n) % (int)n + (int)n) % (int)n;
+    const int steps = std::max(1, (int)std::lround(dp * (float)n));
+    double sec = 0.0;
+    for (int k = 0; k < steps; k++) {
+        const float v = std::clamp(g_ref_speed[(size_t)((i0 + k) % (int)n)], 12.0f, 95.0f);
+        sec += 1.0 / (double)v;
+    }
+    return (float)sec;
+}
 
 // 0x1D5F50(trackData, stream): loads the .tbf section-6 AI segment speed tables into trackData + 0xEC.
 bool track_ai_speeds_hook(PPUContext& c) {
     static thread_local bool inside = false;
+    if (inside) return false;
     const PaceConfig cfg = pace_config();
-    if (inside || cfg.mode == PaceMode::original) return false;
     const u32 track_data = (u32)c.r[3];
     inside = true;
     sub_001D5F50(c);
     inside = false;
-    apply_track_pace(track_data, cfg);
+    if (cfg.mode != PaceMode::original) apply_track_pace(track_data, cfg);
+    cache_track_ref_speeds(track_data);
     return true;
 }
 
@@ -721,6 +797,47 @@ bool ai_faketimes_hook(PPUContext& c) {
     sub_001C04DC(c);
     inside = false;
     scale_faketimes(c, fkt_obj, track_info, cfg);
+    return true;
+}
+
+// 0x62761C(outTicksPtr, trialSession): computes the Career Trial target lap time (in 50.025 Hz ticks) by
+// querying TrackLogic + 0x18C (FakeTimes) for the team's #1 driver. Because F1CE_AI_PACE scales FakeTimes to
+// match faster AI cornering without changing player car physics, undo that scale here so Career Trial targets
+// (and the 3-lap/session timers computed from it in 0x5E9940 / 0x61DB04) stay calibrated to the actual car,
+// while leaving Career Practice, Qualifying and Race AI pace 100% enhanced.
+bool career_trial_target_hook(PPUContext& c) {
+    static thread_local bool inside = false;
+    const PaceConfig cfg = pace_config();
+    if (inside || cfg.mode == PaceMode::original) return false;
+
+    const u32 out_ptr = (u32)c.r[3];
+    const u32 trial_session = (u32)c.r[4];
+
+    inside = true;
+    sub_0062761C(c);
+    inside = false;
+
+    float scale = g_last_fkt_scale;
+    if (trial_session && mem::readable(trial_session + 52, 4)) {
+        const u32 track_logic = ld32(trial_session + 52);
+        if (track_logic) {
+            const auto it = g_fkt_scales.find(track_logic + 0x18Cu);
+            if (it != g_fkt_scales.end()) scale = it->second;
+        }
+    }
+
+    if (scale > 0.50f && scale < 0.999f && out_ptr && mem::readable(out_ptr, 4)) {
+        const s32 scaled_ticks = (s32)ld32(out_ptr);
+        if (scaled_ticks > 500 && scaled_ticks < 30000) {
+            const s32 orig_ticks = (s32)std::lround((double)scaled_ticks / (double)scale);
+            st32(out_ptr, (u32)orig_ticks);
+            const double orig_s = (double)orig_ticks / 50.02500915527344;
+            const double scaled_s = (double)scaled_ticks / 50.02500915527344;
+            LOG_I("career trial: restored retail target %d:%06.3f (was %d:%06.3f under AI pace %.3fx)",
+                  (int)(orig_s / 60.0), std::fmod(orig_s, 60.0),
+                  (int)(scaled_s / 60.0), std::fmod(scaled_s, 60.0), scale);
+        }
+    }
     return true;
 }
 
@@ -819,15 +936,54 @@ bool ai_wet_speed_hook(PPUContext& c) {
     return true;
 }
 
+// Retail dynamics.bin section 9 gives Dry Soft only +2.28% more peak grip than Hard (1.79 vs 1.75 -> ~0.35-0.45 s/lap
+// fresh), making Soft strictly worse than Hard once realistic tyre wear is active. F1CE_SOFT_GRIP (default ON: 1.042x,
+// lifting effective peak grip to ~1.865 vs 1.75 = +6.6% -> ~0.9-1.2 s/lap faster when new) makes the Soft vs Hard
+// speed/wear trade-off genuinely worthwhile in qualifying, undercuts and multi-stop races.
+float soft_grip_boost() {
+    static const float boost = [] {
+        const char* e = getenv("F1CE_SOFT_GRIP");
+        if (!e || !*e) {
+            LOG_I("tyre_grip: realistic Dry Soft peak grip active (+4.2%% -> ~1.865 vs Hard 1.75)");
+            return 1.042f;
+        }
+        std::string s(e);
+        for (char& ch : s) ch = (char)tolower((unsigned char)ch);
+        if (s == "0" || s == "off" || s == "original") return 1.0f;
+        if (s == "1" || s == "on" || s == "realistic") {
+            LOG_I("tyre_grip: realistic Dry Soft peak grip active (+4.2%% -> ~1.865 vs Hard 1.75)");
+            return 1.042f;
+        }
+        char* end = nullptr;
+        float v = strtof(e, &end);
+        if (end && end != e && std::isfinite(v) && v >= 1.0f && v <= 1.12f) {
+            LOG_I("tyre_grip: custom Dry Soft peak grip multiplier %.3fx", v);
+            return v;
+        }
+        return 1.042f;
+    }();
+    return boost;
+}
+
+float current_track_wetness() {
+    if (!mem::readable(0x100DB3B8, 4)) return 0.0f;
+    const u32 track_logic = ld32(0x100DB3B8);
+    if (!track_logic || !mem::readable(track_logic + 0x80C, 4)) return 0.0f;
+    const u32 weather = ld32(track_logic + 0x80C);
+    if (!weather || !mem::readable(weather + 0x24, 4)) return 0.0f;
+    return std::clamp(ldf(weather + 0x24), 0.0f, 1.0f);
+}
+
 // 0x113F90(car): updates tyre temperature, per-wheel wear (car + 0x8B0), and final 4-wheel tyre grip (car + 0x4D0).
 bool tyre_wear_hook(PPUContext& c) {
     static thread_local bool inside = false;
     const TyreWearConfig& cfg = tyre_wear_config();
-    if (inside || cfg.mode == TyreWearMode::original) return false;
+    const float s_boost = soft_grip_boost();
+    if (inside || (cfg.mode == TyreWearMode::original && s_boost <= 1.0005f)) return false;
 
     const u32 car = (u32)c.r[3];
     // Bit 1 of car + 0x1148 is SET when tyre wear is active (0x114988 runs when (flags & 2) != 0)
-    if (!(ld32(car + 0x1148) & 0x2u)) return false;
+    const bool wear_active = (cfg.mode != TyreWearMode::original) && ((ld32(car + 0x1148) & 0x2u) != 0);
 
     const u32 orig_hi_u = ld32(car + 0x37C);
     const u32 orig_base_u = ld32(car + 0x380);
@@ -842,31 +998,58 @@ bool tyre_wear_hook(PPUContext& c) {
     // Dry compounds have orig_hi < 0.20 (hard 0.070, soft 0.085); inter (0.35) and wet (0.7875) already wear fast.
     const bool is_dry = orig_hi > 0.001f && orig_hi < 0.20f;
     const bool is_soft = is_dry && orig_hi >= 0.080f;
+    const bool apply_soft_boost = is_soft && s_boost > 1.0005f;
 
-    const float rate_mult = is_dry ? (cfg.dry_mult * (is_soft ? cfg.soft_extra : 1.0f)) : cfg.wet_mult;
-    const float new_hi = orig_hi * rate_mult;
-    const float new_base = orig_base * rate_mult;
-    const float new_thr = is_dry ? std::min(orig_thr, cfg.dry_threshold) : std::min(orig_thr, 0.35f);
-    const float new_loss = is_dry ? (is_soft ? cfg.soft_loss : cfg.hard_loss) : std::max(orig_loss, cfg.wet_loss);
+    if (!wear_active && !apply_soft_boost) return false;
 
-    const u32 mine_hi_u = std::bit_cast<u32>(new_hi);
-    const u32 mine_base_u = std::bit_cast<u32>(new_base);
-    const u32 mine_thr_u = std::bit_cast<u32>(new_thr);
-    const u32 mine_loss_u = std::bit_cast<u32>(new_loss);
+    u32 mine_hi_u = orig_hi_u, mine_base_u = orig_base_u, mine_thr_u = orig_thr_u, mine_loss_u = orig_loss_u;
+    float new_thr = orig_thr, new_loss = orig_loss;
 
-    st32(car + 0x37C, mine_hi_u);
-    st32(car + 0x380, mine_base_u);
-    st32(car + 0x384, mine_thr_u);
-    st32(car + 0x388, mine_loss_u);
+    if (wear_active) {
+        const float rate_mult = is_dry ? (cfg.dry_mult * (is_soft ? cfg.soft_extra : 1.0f)) : cfg.wet_mult;
+        const float new_hi = orig_hi * rate_mult;
+        const float new_base = orig_base * rate_mult;
+        new_thr = is_dry ? std::min(orig_thr, cfg.dry_threshold) : std::min(orig_thr, 0.35f);
+        new_loss = is_dry ? (is_soft ? cfg.soft_loss : cfg.hard_loss) : std::max(orig_loss, cfg.wet_loss);
+
+        mine_hi_u = std::bit_cast<u32>(new_hi);
+        mine_base_u = std::bit_cast<u32>(new_base);
+        mine_thr_u = std::bit_cast<u32>(new_thr);
+        mine_loss_u = std::bit_cast<u32>(new_loss);
+
+        st32(car + 0x37C, mine_hi_u);
+        st32(car + 0x380, mine_base_u);
+        st32(car + 0x384, mine_thr_u);
+        st32(car + 0x388, mine_loss_u);
+    }
 
     inside = true;
     sub_00113F90(c);
     inside = false;
 
-    if (ld32(car + 0x37C) == mine_hi_u) st32(car + 0x37C, orig_hi_u);
-    if (ld32(car + 0x380) == mine_base_u) st32(car + 0x380, orig_base_u);
-    if (ld32(car + 0x384) == mine_thr_u) st32(car + 0x384, orig_thr_u);
-    if (ld32(car + 0x388) == mine_loss_u) st32(car + 0x388, orig_loss_u);
+    if (wear_active) {
+        if (ld32(car + 0x37C) == mine_hi_u) st32(car + 0x37C, orig_hi_u);
+        if (ld32(car + 0x380) == mine_base_u) st32(car + 0x380, orig_base_u);
+        if (ld32(car + 0x384) == mine_thr_u) st32(car + 0x384, orig_thr_u);
+        if (ld32(car + 0x388) == mine_loss_u) st32(car + 0x388, orig_loss_u);
+    }
+
+    // Boost fresh Dry Soft peak grip on dry surfaces (fades smoothly to 1.0x as track gets wet)
+    float eff_soft_boost = 1.0f;
+    if (apply_soft_boost) {
+        const float dry_factor = 1.0f - current_track_wetness();
+        eff_soft_boost = 1.0f + (s_boost - 1.0f) * dry_factor;
+        if (eff_soft_boost > 1.0005f) {
+            for (int i = 0; i < 4; i++) {
+                const float grip = ldf(car + 0x4D0 + 4 * i);
+                if (grip > 0.0f && std::isfinite(grip)) {
+                    stf(car + 0x4D0 + 4 * i, grip * eff_soft_boost);
+                }
+            }
+        }
+    }
+
+    if (!wear_active) return true;
 
     // Apply proportional wear grip degradation to AI cars too (retail skips L_114DDC when car + 0x2E0 != 0)
     const bool is_ai = ld8(car + 0x2E0) != 0;
@@ -902,7 +1085,7 @@ bool tyre_wear_hook(PPUContext& c) {
             s_last_log = now;
             const float denom = std::max(0.05f, 1.0f - new_thr);
             const float eff = std::clamp((avg_w - new_thr) / denom, 0.0f, 1.0f);
-            const float grip_mult = 1.0f - eff * new_loss;
+            const float grip_mult = (1.0f - eff * new_loss) * eff_soft_boost;
             const float ai_avg = s_ai_wear_cnt > 0 ? (s_ai_wear_sum / (float)s_ai_wear_cnt) : 0.0f;
             s_ai_wear_sum = 0.0f;
             s_ai_wear_cnt = 0;

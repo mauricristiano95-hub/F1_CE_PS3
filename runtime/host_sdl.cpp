@@ -16,6 +16,9 @@
 #include <cstring>
 #include <vector>
 void set_thread_name(const char* name);   // core.cpp
+void mfd_key_tyre(int delta);             // hle_mfd.cpp
+void mfd_key_tc();
+void mfd_key_abs();
 
 namespace host {
 void wheel_poll();                      // wheel_sdl.cpp (UI thread)
@@ -92,8 +95,14 @@ void update_pad(SDL_Gamepad* gp) {
     for (const auto& b : buttons) {
         const bool analog = gp && is_axis(g_in.pad[b.c]);
         const float v = std::max(key[b.c], pad[b.c]);
-        const bool on = key[b.c] > 0 || (analog ? pad[b.c] > threshold : pad[b.c] > 0.5f);
+        const bool kb_on = key[b.c] > 0;
+        const bool gp_on = analog ? pad[b.c] > threshold : pad[b.c] > 0.5f;
+        const bool on = kb_on || gp_on;
         if (on) (b.word == 1 ? p.digital1 : p.digital2) |= b.bit;
+        if (b.word == 1 && (b.bit & 0xF0u)) {
+            if (gp_on) p.gp_dpad |= (u8)b.bit;
+            if (kb_on) p.kb_dpad |= (u8)b.bit;
+        }
         if (b.idx >= 0) p.pressure[b.idx] = on ? (u16)std::clamp((int)std::lround(v * 255), 1, 255) : 0;
     }
     // sticks: the gamepad's (dead zone; steering with the response curve), else the keys (steering ramped)
@@ -168,6 +177,12 @@ void ui_thread() {
                 overlay::toggle_fps();
             if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.key == SDLK_F4)
                 overlay::toggle_laptimes();
+            if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.key == SDLK_F5)
+                mfd_key_tyre((e.key.mod & SDL_KMOD_SHIFT) ? -1 : +1);
+            if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.key == SDLK_F6)
+                mfd_key_tc();
+            if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.key == SDLK_F7)
+                mfd_key_abs();
             if (e.type == SDL_EVENT_MOUSE_MOTION || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP ||
                 e.type == SDL_EVENT_WINDOW_MOUSE_LEAVE) {
                 // (the event's own position and button: window coordinates, as SDL_GetWindowSize)

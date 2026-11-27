@@ -134,6 +134,37 @@ std::vector<Option> make_options() {
                        "In the original game dry tyres wear very slowly and lose only 6.5-7.5% grip at 100% wear. "
                        "1.5x is ideal for 50% scaled races; 2.0x-2.5x suits 100% realistic races. Lowers the grip-drop "
                        "threshold, raises end-of-stint grip loss (soft wears faster than hard), and degrades AI tyres fairly."));
+    v.push_back(choice(GENERAL, "Soft tyre grip", "F1CE_SOFT_GRIP",
+                       {{"On (realistic Soft pace)", nullptr},
+                        {"Off (original PS3)", "0"}}, 0,
+                       "In the original game Dry Soft only has +2.3% more peak grip than Hard (~0.4 s/lap fresh), making "
+                       "Soft rarely worth its higher wear. On raises fresh Dry Soft peak grip by +4.2% (~0.9-1.2 s/lap "
+                       "faster than Hard when new, fading naturally as wear builds) across practice, qualifying and races."));
+    v.push_back(choice(GENERAL, "Penalty system", "F1CE_PENALTY_MODE",
+                       {{"Original (PS3, rev limiter)", nullptr},
+                        {"Drive-Through (2 warnings)", "drivethrough"},
+                        {"Strict Drive-Through (0 warnings)", "strict"},
+                        {"Warnings only (no slowdown)", "warnings"}}, 0,
+                       "Replaces the game's artificial on-track rev-limiter slowdown with realistic F1 penalties. "
+                       "Drive-Through (2 warnings): minor cuts give 2 steward warnings then a Drive-Through on the 3rd "
+                       "offence (pass through pit lane within 3 laps without stopping, or get Black Flagged). Blatant "
+                       "shortcuts (>= 0.45 s gained or overtaking off-track) open a 5 s Give Back Time window or issue "
+                       "an immediate Drive-Through. In Practice/Qualifying, cuts simply invalidate the lap time."));
+    v.push_back(choice(GENERAL, "Mechanical failures", "F1CE_RELIABILITY",
+                       {{"Original (PS3)", nullptr},
+                        {"Realistic (player enabled)", "realistic"},
+                        {"High (dramatic)", "high"}}, 0,
+                       "Enables full native mechanical failures (gradual engine power loss -> smoke blowout, sudden "
+                       "engine, gearbox, hydraulics, suspension) on the player's car during races while preserving "
+                       "2006 team reliability differences. Realistic: ~8-12% race risk for player; High: ~20-25% + AI."));
+    v.push_back(choice(GENERAL, "On-track MFD", "F1CE_ONTRACK_MFD",
+                       {{"On (D-Pad tyres + F5/F6/F7)", nullptr},
+                        {"Keyboard only (F5/F6/F7)", "keyboard"},
+                        {"Off (original)", "0"}}, 0,
+                       "On-track Pit Tyre MFD while driving (menus, pause and replays stay normal): "
+                       "D-Pad Up = SOFT, Down = HARD, Left = INTER, Right = WET (tap same direction again for AUTO). "
+                       "Keyboard: F5 cycles pit tyres, F6 cycles Traction Control, F7 toggles ABS. "
+                       "Keyboard arrow steering is never intercepted; choose Keyboard only if you steer with the gamepad D-Pad."));
     v.push_back(header(GENERAL, "Discord"));
     v.push_back(toggle(GENERAL, "Discord Rich Presence", "F1CE_DISCORD_RPC",
                        "Shows your current circuit, team and lap on Discord via local IPC (requires a numeric "

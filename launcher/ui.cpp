@@ -107,6 +107,29 @@ void make_logo() {
     SDL_SetTextureScaleMode(g_logo, SDL_SCALEMODE_LINEAR);
     SDL_DestroySurface(s);
 }
+// Tear down the SDL3 renderer (and its D3D/DXGI swapchain on Windows) while the game runs so capture hooks like
+// NVIDIA ShadowPlay attach to f1ce.exe instead of the hidden launcher window, and recreate it when the game exits.
+void release_renderer() {
+    if (!g_renderer) return;
+    if (g_logo) { SDL_DestroyTexture(g_logo); g_logo = nullptr; }
+    if (g_carbon) { SDL_DestroyTexture(g_carbon); g_carbon = nullptr; }
+    ImGui_ImplSDLRenderer3_Shutdown();
+    ImGui_ImplSDL3_Shutdown();
+    SDL_DestroyRenderer(g_renderer);
+    g_renderer = nullptr;
+}
+bool restore_renderer() {
+    if (g_renderer) return true;
+    g_renderer = SDL_CreateRenderer(g_window, nullptr);
+    if (!g_renderer) return false;
+    SDL_SetRenderVSync(g_renderer, 1);
+    ImGui_ImplSDL3_InitForSDLRenderer(g_window, g_renderer);
+    ImGui_ImplSDLRenderer3_Init(g_renderer);
+    ImGui_ImplSDL3_SetGamepadMode(ImGui_ImplSDL3_GamepadMode_AutoAll);
+    make_carbon();
+    make_logo();
+    return true;
+}
 ImTextureRef tex(SDL_Texture* t) { return ImTextureRef((ImTextureID)(intptr_t)t); }
 }  // namespace
 
@@ -859,8 +882,8 @@ int run() {
     int frames = 0, idle = 0;
     bool shown = false;
     auto handle = [&](const SDL_Event& e) {
-        if (capture_event(e)) return;
-        ImGui_ImplSDL3_ProcessEvent(&e);
+        if (g_renderer && capture_event(e)) return;
+        if (g_renderer) ImGui_ImplSDL3_ProcessEvent(&e);
         switch (e.type) {
             case SDL_EVENT_QUIT: g_quit = true; break;
             case SDL_EVENT_WINDOW_CLOSE_REQUESTED: if (e.window.windowID == SDL_GetWindowID(g_window)) g_quit = true; break;
@@ -875,6 +898,11 @@ int run() {
             default:
                 if (e.type == g_exit_event) {
                     g_game_running = false;
+                    if (!restore_renderer()) {
+                        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "F1 CE", SDL_GetError(), nullptr);
+                        g_quit = true;
+                        break;
+                    }
                     SDL_ShowWindow(g_window);
                     SDL_RaiseWindow(g_window);
                     wheel::resume();
@@ -899,7 +927,7 @@ int run() {
         }
         if (g_quit) break;
         idle = any ? 0 : idle + 1;
-        if (g_game_running) continue;
+        if (g_game_running || !g_renderer) continue;
         {
             std::lock_guard<std::mutex> l(g_folder_m);
             if (g_folder_new) {
@@ -920,6 +948,10 @@ int run() {
         frame();
         ImGui::PopItemFlag();
         ImGui::Render();
+        if (g_game_running) {   // start_game() fired during frame(): drop the D3D renderer immediately
+            release_renderer();
+            continue;
+        }
         SDL_SetRenderDrawColor(g_renderer, 255, 255, 255, 255);
         SDL_RenderClear(g_renderer);
         ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), g_renderer);
@@ -936,10 +968,8 @@ int run() {
     }
     save_all();
     wheel::release();
-    ImGui_ImplSDLRenderer3_Shutdown();
-    ImGui_ImplSDL3_Shutdown();
+    release_renderer();
     ImGui::DestroyContext();
-    SDL_DestroyRenderer(g_renderer);
     SDL_DestroyWindow(g_window);
     SDL_Quit();
     return 0;

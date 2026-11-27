@@ -38,7 +38,11 @@ HOOKS = {0x3FB310: "camera_projection_hook",   # camera projection and frustum, 
          0x17B200: "car_tick_hook",   # hle_physics.cpp
          0x112818: "steer_input_hook", 0x1177F4: "suspension_hook",   # hle_handling.cpp
          0x1D5F50: "track_ai_speeds_hook", 0x1C04DC: "ai_faketimes_hook", 0xCB0E4: "ai_pit_strategies_hook",
-         0xE22B0: "ai_wet_speed_hook", 0x113F90: "tyre_wear_hook",   # hle_ai.cpp
+         0xE22B0: "ai_wet_speed_hook", 0x113F90: "tyre_wear_hook", 0x62761C: "career_trial_target_hook",   # hle_ai.cpp
+         0x12E6D4: "penalty_tick_hook", 0x130EAC: "penalty_flags_hook",
+         0x120658: "penalty_issue_hook", 0x151BDC: "penalty_pitbox_hook",
+         0x10CBBC: "mechanical_failures_hook",   # hle_penalties.cpp
+         0x10D3E8: "tyre_mount_hook",   # hle_mfd.cpp
          0x3574C0: "controller_update_hook",   # hle_rumble.cpp
          0x36F0E8: "playercam_update_hook", 0x36F79C: "playercam_setcam_hook",   # hle_camera.cpp
          0x36DEFC: "camshake_hook", 0x36C764: "camshake2_hook", 0x36DA0C: "camshake3_hook", 0x36DC3C: "camshake3_hook",

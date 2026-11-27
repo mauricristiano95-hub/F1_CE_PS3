@@ -39,6 +39,10 @@ void dump_frame(const u32*, u32, u32) {}
 namespace overlay {
 bool frame(u32, u32, Image*) { return false; }
 bool input_captured() { return false; }
+void toggle_fps() {}
+void toggle_laptimes() {}
+void set_penalty_banner(const PenaltyBanner&) {}
+void set_mfd_state(const MfdState&) {}
 void set_replay_bar(const ReplayBar&) {}
 ReplayBarInput take_replay_input() { return {}; }
 int save_list(SaveMode, const std::vector<SaveEntry>&, int) { return UNAVAILABLE; }

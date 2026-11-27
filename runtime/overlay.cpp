@@ -672,6 +672,22 @@ void update_fps(u64 now) {
     }
 }
 
+// 2006 F1 / FOM broadcast HUD primitives (metallic white header, steel-blue bar, dark translucent timing cells)
+void f1_grad_rect(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 top, ImU32 bot) {
+    dl->AddRectFilledMultiColor(a, b, top, top, bot, bot);
+}
+void f1_shadow_text(ImDrawList* dl, ImFont* f, float sz, ImVec2 p, ImU32 col, const std::string& s, float S) {
+    text(dl, f, sz, ImVec2(p.x + 1.0f * S, p.y + 1.0f * S), IM_COL32(0, 0, 0, 175), s);
+    text(dl, f, sz, p, col, s);
+}
+void f1_frame(ImDrawList* dl, ImVec2 a, ImVec2 b, float S) {
+    // Subtle outer drop shadow + 1 px top specular gloss + metallic grey border
+    dl->AddRectFilled(ImVec2(a.x + 2 * S, b.y), ImVec2(b.x + 2 * S, b.y + 2 * S), IM_COL32(0, 0, 0, 95));
+    dl->AddRectFilled(ImVec2(b.x, a.y + 2 * S), ImVec2(b.x + 2 * S, b.y + 2 * S), IM_COL32(0, 0, 0, 95));
+    dl->AddRectFilled(ImVec2(a.x, a.y), ImVec2(b.x, a.y + 1 * S), IM_COL32(255, 255, 255, 65));
+    dl->AddRect(a, b, IM_COL32(172, 178, 190, 165), 0.0f, 0, std::max(1.0f, 1.0f * S));
+}
+
 void draw_fps(ImDrawList* dl, float W, float H) {
     const float S = std::min(W / 1280.0f, H / 720.0f);
     char num[16], ms[24];
@@ -682,20 +698,28 @@ void draw_fps(ImDrawList* dl, float W, float H) {
         snprintf(num, sizeof(num), "--");
         snprintf(ms, sizeof(ms), "--.- ms");
     }
-    const float sz_num = 22 * S, sz_tag = 15 * S, sz_ms = 15 * S;
-    const float min_w = text_w(F.black, sz_num, "888") + text_w(F.semi, sz_tag, " FPS") + 14 * S +
-                        text_w(F.medium, sz_ms, "88.8 ms") + 28 * S;
-    const float bw = std::max(min_w, 152 * S), bh = 32 * S;
+    const float sz_tag = 13 * S, sz_num = 16 * S, sz_ms = 13 * S;
+    const float tag_w = 38 * S;
+    const float num_w = std::max(text_w(F.medium, sz_num, "120") + 16 * S, 44 * S);
+    const float ms_w = std::max(text_w(F.medium, sz_ms, "88.8 ms") + 16 * S, 62 * S);
+    const float bw = tag_w + num_w + ms_w, bh = 24 * S;
     const float x0 = 14 * S, x1 = x0 + bw;
     const float y1 = H - 14 * S, y0 = y1 - bh;
-    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), IM_COL32(16, 16, 16, 200));
-    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + 4 * S, y1), RED);
-    float x = x0 + 12 * S;
-    text(dl, F.black, sz_num, ImVec2(x, y0 + 5 * S), WHITE, num);
-    x += text_w(F.black, sz_num, num) + 5 * S;
-    text(dl, F.semi, sz_tag, ImVec2(x, y0 + 10 * S), RED, "FPS");
+
+    // 2006 F1 broadcast style: metallic white label cell | dark charcoal FPS value | steel-grey frametime cell
+    f1_grad_rect(dl, ImVec2(x0, y0), ImVec2(x0 + tag_w, y1), IM_COL32(242, 244, 248, 240), IM_COL32(204, 209, 218, 240));
+    f1_grad_rect(dl, ImVec2(x0 + tag_w, y0), ImVec2(x0 + tag_w + num_w, y1), IM_COL32(34, 37, 44, 228), IM_COL32(14, 16, 20, 238));
+    f1_grad_rect(dl, ImVec2(x0 + tag_w + num_w, y0), ImVec2(x1, y1), IM_COL32(84, 91, 108, 224), IM_COL32(58, 63, 77, 234));
+    dl->AddLine(ImVec2(x0 + tag_w, y0), ImVec2(x0 + tag_w, y1), IM_COL32(20, 22, 28, 200), 1.0f);
+    dl->AddLine(ImVec2(x0 + tag_w + num_w, y0), ImVec2(x0 + tag_w + num_w, y1), IM_COL32(20, 22, 28, 180), 1.0f);
+    f1_frame(dl, ImVec2(x0, y0), ImVec2(x1, y1), S);
+
+    const float tw = text_w(F.medium, sz_tag, "FPS");
+    text(dl, F.medium, sz_tag, ImVec2(x0 + (tag_w - tw) * 0.5f, y0 + 5 * S), IM_COL32(22, 25, 32, 255), "FPS");
+    const float nw = text_w(F.medium, sz_num, num);
+    f1_shadow_text(dl, F.medium, sz_num, ImVec2(x0 + tag_w + (num_w - nw) * 0.5f, y0 + 3.5f * S), WHITE, num, S);
     const float mw = text_w(F.medium, sz_ms, ms);
-    text(dl, F.medium, sz_ms, ImVec2(x1 - 10 * S - mw, y0 + 10 * S), IM_COL32(190, 190, 190, 255), ms);
+    f1_shadow_text(dl, F.medium, sz_ms, ImVec2(x0 + tag_w + num_w + (ms_w - mw) * 0.5f, y0 + 5 * S), IM_COL32(228, 232, 240, 255), ms, S);
 }
 
 // ------------------------------------------------------------------ Fastest Lap / timing pill (F4 / F1CE_SHOW_LAPTIMES)
@@ -810,45 +834,284 @@ void sample_laptimes(u64 now) {
 void draw_laptimes(ImDrawList* dl, float W, float H) {
     if (!g_lap.in_session) return;
     const float S = std::min(W / 1280.0f, H / 720.0f);
-    const ImU32 PURPLE = IM_COL32(176, 68, 232, 255);
-    const ImU32 GREEN = IM_COL32(96, 224, 128, 255);
-    const ImU32 AMBER = IM_COL32(255, 180, 72, 255);
-    const ImU32 DIM = IM_COL32(190, 190, 190, 255);
+    const ImU32 GREEN = IM_COL32(124, 224, 138, 255);
+    const ImU32 AMBER = IM_COL32(244, 198, 96, 255);
+    const ImU32 SILVER = IM_COL32(220, 224, 232, 255);
 
     const std::string ai_t = fmt_lap_time(g_lap.ai_best_ticks, g_lap.dt);
     const std::string hu_t = fmt_lap_time(g_lap.human_best_ticks, g_lap.dt);
-    const char* tag = (g_lap.ai_best_team >= 0 && g_lap.ai_best_team < 11) ? kTeamTag[g_lap.ai_best_team] : "";
+    const char* tag = (g_lap.ai_best_team >= 0 && g_lap.ai_best_team < 11) ? kTeamTag[g_lap.ai_best_team] : "AI";
     char delta_buf[24] = "";
-    ImU32 delta_col = DIM;
+    ImU32 delta_col = SILVER;
     if (g_lap.ai_best_ticks > 0 && g_lap.human_best_ticks > 0) {
         const double d = (double)(g_lap.human_best_ticks - g_lap.ai_best_ticks) * (double)g_lap.dt;
-        snprintf(delta_buf, sizeof(delta_buf), "%+.2fs", d);
+        snprintf(delta_buf, sizeof(delta_buf), "%+.2f", d);
         delta_col = d <= 0.0 ? GREEN : AMBER;
     }
 
-    const float sz_lbl = 14 * S, sz_val = 17 * S, sz_sub = 14 * S;
-    const float bw = 226 * S, bh = 54 * S;
+    // 2006 F1 CE "Melhor Volta" broadcast timing tower style
+    const float sz_hdr = 12.5f * S, sz_tag = 13 * S, sz_val = 15.5f * S, sz_sub = 13 * S;
+    const float hdr_h = 19 * S, row_h = 22 * S, cell_w = 44 * S;
+    const float bw = 204 * S, bh = hdr_h + row_h * 2;
     const float x1 = W - 14 * S, x0 = x1 - bw;
     // Positioned below the game's native top-right lap timer so they never overlap
     const float y0 = 92 * S, y1 = y0 + bh;
-    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), IM_COL32(16, 16, 16, 200));
-    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + 4 * S, y1), PURPLE);
+    const float r1_y0 = y0 + hdr_h, r1_y1 = r1_y0 + row_h;
+    const float r2_y0 = r1_y1, r2_y1 = y1;
 
-    // Row 1: AI Fastest Lap
-    const float r1 = y0 + 6 * S;
-    text(dl, F.semi, sz_lbl, ImVec2(x0 + 12 * S, r1 + 2 * S), PURPLE, "AI FL");
-    text(dl, F.black, sz_val, ImVec2(x0 + 62 * S, r1), WHITE, ai_t);
-    if (*tag) {
-        const float tw = text_w(F.semi, sz_sub, tag);
-        text(dl, F.semi, sz_sub, ImVec2(x1 - 10 * S - tw, r1 + 2 * S), DIM, tag);
-    }
-    // Row 2: Player Best Lap + delta vs AI FL
-    const float r2 = y0 + 30 * S;
-    text(dl, F.semi, sz_lbl, ImVec2(x0 + 12 * S, r2 + 2 * S), DIM, "YOU");
-    text(dl, F.black, sz_val, ImVec2(x0 + 62 * S, r2), WHITE, hu_t);
+    // Header bar: 2006 FOM steel-blue metallic gradient ("FASTEST LAP")
+    f1_grad_rect(dl, ImVec2(x0, y0), ImVec2(x1, r1_y0), IM_COL32(108, 118, 144, 236), IM_COL32(72, 79, 100, 240));
+    const float hw = text_w(F.medium, sz_hdr, "FASTEST LAP");
+    f1_shadow_text(dl, F.medium, sz_hdr, ImVec2(x0 + (bw - hw) * 0.5f, y0 + 3 * S), WHITE, "FASTEST LAP", S);
+
+    // Row 1 (AI Best): classic 2006 grey index cell + dark translucent timing cell
+    f1_grad_rect(dl, ImVec2(x0, r1_y0), ImVec2(x0 + cell_w, r1_y1), IM_COL32(118, 124, 138, 236), IM_COL32(84, 89, 102, 240));
+    f1_grad_rect(dl, ImVec2(x0 + cell_w, r1_y0), ImVec2(x1, r1_y1), IM_COL32(34, 37, 44, 226), IM_COL32(16, 18, 22, 236));
+    const float tw1 = text_w(F.medium, sz_tag, tag);
+    f1_shadow_text(dl, F.medium, sz_tag, ImVec2(x0 + (cell_w - tw1) * 0.5f, r1_y0 + 4 * S), WHITE, tag, S);
+    f1_shadow_text(dl, F.medium, sz_val, ImVec2(x0 + cell_w + 10 * S, r1_y0 + 2.5f * S), WHITE, ai_t, S);
+    const float aiw = text_w(F.medium, sz_sub, "AI");
+    f1_shadow_text(dl, F.medium, sz_sub, ImVec2(x1 - 8 * S - aiw, r1_y0 + 4 * S), SILVER, "AI", S);
+
+    // Row 2 (Player Best): metallic white driver cell + dark translucent timing cell + delta
+    f1_grad_rect(dl, ImVec2(x0, r2_y0), ImVec2(x0 + cell_w, r2_y1), IM_COL32(244, 246, 250, 242), IM_COL32(206, 211, 220, 242));
+    f1_grad_rect(dl, ImVec2(x0 + cell_w, r2_y0), ImVec2(x1, r2_y1), IM_COL32(28, 30, 36, 228), IM_COL32(12, 14, 18, 238));
+    const float tw2 = text_w(F.medium, sz_tag, "YOU");
+    text(dl, F.medium, sz_tag, ImVec2(x0 + (cell_w - tw2) * 0.5f, r2_y0 + 4 * S), IM_COL32(22, 25, 32, 255), "YOU");
+    f1_shadow_text(dl, F.medium, sz_val, ImVec2(x0 + cell_w + 10 * S, r2_y0 + 2.5f * S), WHITE, hu_t, S);
     if (*delta_buf) {
         const float dw = text_w(F.medium, sz_sub, delta_buf);
-        text(dl, F.medium, sz_sub, ImVec2(x1 - 10 * S - dw, r2 + 2 * S), delta_col, delta_buf);
+        f1_shadow_text(dl, F.medium, sz_sub, ImVec2(x1 - 8 * S - dw, r2_y0 + 4 * S), delta_col, delta_buf, S);
+    }
+
+    // Crisp 1 px internal dividers + metallic border
+    dl->AddLine(ImVec2(x0, r1_y0), ImVec2(x1, r1_y0), IM_COL32(18, 20, 26, 210), 1.0f);
+    dl->AddLine(ImVec2(x0, r2_y0), ImVec2(x1, r2_y0), IM_COL32(18, 20, 26, 210), 1.0f);
+    dl->AddLine(ImVec2(x0 + cell_w, r1_y0), ImVec2(x0 + cell_w, y1), IM_COL32(18, 20, 26, 200), 1.0f);
+    f1_frame(dl, ImVec2(x0, y0), ImVec2(x1, y1), S);
+}
+
+// ------------------------------------------------------------------ Steward / Penalty banner (hle_penalties.cpp)
+PenaltyBanner g_pen;
+std::atomic<bool> g_pen_active{false};
+std::atomic<u64> g_pen_expires{0};
+
+void draw_penalty_banner(ImDrawList* dl, float W, float H) {
+    if (!g_pen.active || g_pen.title.empty()) return;
+    const float S = std::min(W / 1280.0f, H / 720.0f);
+
+    // 2006 F1 FIA Race Control two-bar header graphic (matches the game's Grand Prix title + subtitle banner)
+    ImU32 hdr_top = IM_COL32(246, 247, 250, 244), hdr_bot = IM_COL32(210, 215, 224, 244);
+    ImU32 title_col = IM_COL32(20, 23, 30, 255);
+    ImU32 sub_top = IM_COL32(96, 104, 126, 236), sub_bot = IM_COL32(62, 68, 86, 240);
+    ImU32 flag_col = IM_COL32(236, 192, 42, 255);
+    bool dark_title = true;
+
+    switch (g_pen.severity) {
+        case PenaltySeverity::Info:
+            flag_col = IM_COL32(165, 174, 190, 255);
+            break;
+        case PenaltySeverity::Warning:
+            flag_col = IM_COL32(240, 196, 40, 255);   // FIA yellow warning flag
+            break;
+        case PenaltySeverity::FinalWarning:
+            flag_col = IM_COL32(235, 118, 32, 255);   // FIA black-and-white / final warning
+            sub_top = IM_COL32(82, 86, 102, 238);
+            sub_bot = IM_COL32(50, 53, 66, 242);
+            break;
+        case PenaltySeverity::DriveThrough:
+            hdr_top = IM_COL32(194, 40, 40, 244);     // Classic F1 crimson broadcast alert bar
+            hdr_bot = IM_COL32(142, 24, 24, 246);
+            title_col = WHITE;
+            dark_title = false;
+            sub_top = IM_COL32(42, 45, 54, 236);
+            sub_bot = IM_COL32(20, 22, 28, 242);
+            flag_col = IM_COL32(245, 245, 248, 255);
+            break;
+        case PenaltySeverity::Serving:
+            hdr_top = IM_COL32(92, 116, 154, 242);
+            hdr_bot = IM_COL32(60, 78, 110, 244);
+            title_col = WHITE;
+            dark_title = false;
+            sub_top = IM_COL32(36, 40, 48, 234);
+            sub_bot = IM_COL32(18, 20, 26, 240);
+            flag_col = IM_COL32(110, 208, 242, 255);
+            break;
+        case PenaltySeverity::Served:
+            flag_col = IM_COL32(72, 196, 102, 255);   // Green flag cleared
+            break;
+        case PenaltySeverity::BlackFlag:
+            hdr_top = IM_COL32(36, 38, 44, 248);      // Solid FIA Black Flag header
+            hdr_bot = IM_COL32(14, 15, 18, 250);
+            title_col = WHITE;
+            dark_title = false;
+            sub_top = IM_COL32(158, 32, 32, 240);
+            sub_bot = IM_COL32(114, 20, 20, 244);
+            flag_col = IM_COL32(18, 18, 20, 255);
+            break;
+    }
+
+    const float sz_t = 15.5f * S, sz_s = 13 * S;
+    const float flag_w = 24 * S;
+    const float tw = text_w(F.medium, sz_t, g_pen.title.c_str());
+    const float sw = g_pen.subtitle.empty() ? 0.0f : text_w(F.medium, sz_s, g_pen.subtitle.c_str());
+    const float bw = std::max(std::max(tw + flag_w + 26 * S, sw + 28 * S), 268 * S);
+    const float hdr_h = 25 * S, sub_h = g_pen.subtitle.empty() ? 0.0f : 22 * S;
+    const float bh = hdr_h + sub_h;
+    const float x0 = (W - bw) * 0.5f, x1 = x0 + bw;
+    const float y0 = 16 * S, y1 = y0 + bh;
+
+    // Top bar (Title + FIA flag square on left)
+    f1_grad_rect(dl, ImVec2(x0, y0), ImVec2(x1, y0 + hdr_h), hdr_top, hdr_bot);
+    // Small crisp FIA status flag badge on the left of the header bar
+    const float fx0 = x0 + 6 * S, fy0 = y0 + 5 * S, fx1 = x0 + flag_w - 4 * S, fy1 = y0 + hdr_h - 5 * S;
+    if (g_pen.severity == PenaltySeverity::FinalWarning) {
+        // Authentic FIA black-and-white diagonal unsportsmanlike-conduct warning flag!
+        dl->AddTriangleFilled(ImVec2(fx0, fy0), ImVec2(fx1, fy0), ImVec2(fx0, fy1), IM_COL32(246, 246, 248, 255));
+        dl->AddTriangleFilled(ImVec2(fx1, fy0), ImVec2(fx1, fy1), ImVec2(fx0, fy1), IM_COL32(22, 24, 28, 255));
+    } else {
+        dl->AddRectFilled(ImVec2(fx0, fy0), ImVec2(fx1, fy1), flag_col);
+    }
+    dl->AddRect(ImVec2(fx0, fy0), ImVec2(fx1, fy1),
+                g_pen.severity == PenaltySeverity::BlackFlag ? IM_COL32(230, 232, 238, 220) : IM_COL32(24, 26, 32, 170),
+                0.0f, 0, 1.0f);
+
+    if (dark_title) {
+        text(dl, F.medium, sz_t, ImVec2(x0 + flag_w + 6 * S, y0 + 4.5f * S), title_col, g_pen.title);
+    } else {
+        f1_shadow_text(dl, F.medium, sz_t, ImVec2(x0 + flag_w + 6 * S, y0 + 4.5f * S), title_col, g_pen.title, S);
+    }
+
+    // Bottom bar (Subtitle)
+    if (!g_pen.subtitle.empty()) {
+        f1_grad_rect(dl, ImVec2(x0, y0 + hdr_h), ImVec2(x1, y1), sub_top, sub_bot);
+        dl->AddLine(ImVec2(x0, y0 + hdr_h), ImVec2(x1, y0 + hdr_h), IM_COL32(18, 20, 26, 210), 1.0f);
+        f1_shadow_text(dl, F.medium, sz_s, ImVec2(x0 + 10 * S, y0 + hdr_h + 4 * S), IM_COL32(240, 242, 248, 255), g_pen.subtitle, S);
+    }
+
+    f1_frame(dl, ImVec2(x0, y0), ImVec2(x1, y1), S);
+}
+
+// ------------------------------------------------------------------ On-track MFD (hle_mfd.cpp: 4-way Pit Tyre MFD)
+MfdState g_mfd_ov;
+std::atomic<bool> g_mfd_visible{false};
+std::atomic<int> g_mfd_tyre_code{0};
+std::atomic<u64> g_mfd_popup_until{0};
+std::atomic<u64> g_mfd_aid_until{0};
+
+ImU32 mfd_tyre_color(int code) {
+    switch (code) {
+        case 1: return IM_COL32(240, 242, 246, 255);   // HARD: crisp white
+        case 2: return IM_COL32(246, 200, 56, 255);    // SOFT: F1 gold/yellow
+        case 3: return IM_COL32(78, 206, 112, 255);    // INTER: green
+        case 4: return IM_COL32(74, 168, 244, 255);    // WET: blue
+        default: return IM_COL32(174, 182, 198, 255);  // AUTO: metallic silver
+    }
+}
+
+void draw_mfd(ImDrawList* dl, float W, float H, u64 now, bool lap_on) {
+    if (!g_mfd_ov.visible) return;
+    const bool expanded = g_mfd_ov.popup_until_us != 0 && now < g_mfd_ov.popup_until_us;
+    const bool pinned_tyre = g_mfd_ov.tyre_code != 0;
+    const bool aid_toast = g_mfd_ov.aid_until_us != 0 && now < g_mfd_ov.aid_until_us && !g_mfd_ov.aid_tag.empty();
+    if (!expanded && !pinned_tyre && !aid_toast) return;
+
+    const float S = std::min(W / 1280.0f, H / 720.0f);
+    const ImU32 GREEN = IM_COL32(124, 224, 138, 255);
+    const ImU32 AMBER = IM_COL32(244, 198, 96, 255);
+    const ImU32 SILVER = IM_COL32(218, 222, 232, 255);
+    const ImU32 tyre_col = mfd_tyre_color(g_mfd_ov.tyre_code);
+
+    // Position on the right edge below the native lap timer (and below F4 Fastest Lap when active)
+    const float bw = 204 * S;
+    const float x1 = W - 14 * S, x0 = x1 - bw;
+    float cur_y = (lap_on ? 164.0f : 92.0f) * S;
+
+    if (expanded) {
+        // Expanded 4-way 2006 F1 broadcast Pit Tyre MFD card (UP=SOFT, DN=HARD, LT=INTER, RT=WET)
+        const float sz_hdr = 12.5f * S, sz_dir = 12.0f * S, sz_val = 14.0f * S, sz_note = 11.5f * S;
+        const float hdr_h = 19 * S, row_h = 21 * S, cell_w = 42 * S;
+        const float note_h = g_mfd_ov.note.empty() ? 0.0f : 18 * S;
+        const float y0 = cur_y, y1 = y0 + hdr_h + row_h * 4 + note_h;
+
+        // Header bar: 2006 FOM steel-blue metallic gradient
+        f1_grad_rect(dl, ImVec2(x0, y0), ImVec2(x1, y0 + hdr_h), IM_COL32(108, 118, 144, 238), IM_COL32(72, 79, 100, 242));
+        const float hw = text_w(F.medium, sz_hdr, "PIT TYRES");
+        f1_shadow_text(dl, F.medium, sz_hdr, ImVec2(x0 + (bw - hw) * 0.5f, y0 + 3 * S), WHITE, "PIT TYRES", S);
+
+        struct TyreRow { int code; const char* dir; const char* name; };
+        constexpr TyreRow rows[4] = {
+            {2, "UP", "SOFT"},
+            {1, "DN", "HARD"},
+            {3, "LT", "INTER"},
+            {4, "RT", "WET"},
+        };
+        for (int i = 0; i < 4; i++) {
+            const float ry0 = y0 + hdr_h + i * row_h;
+            const float ry1 = ry0 + row_h;
+            const bool active = (g_mfd_ov.tyre_code == rows[i].code);
+            const ImU32 col = mfd_tyre_color(rows[i].code);
+            // Left direction cell: metallic white when selected, steel-grey otherwise
+            if (active) f1_grad_rect(dl, ImVec2(x0, ry0), ImVec2(x0 + cell_w, ry1), IM_COL32(244, 246, 250, 244), IM_COL32(206, 211, 220, 244));
+            else f1_grad_rect(dl, ImVec2(x0, ry0), ImVec2(x0 + cell_w, ry1), IM_COL32(118, 124, 138, 236), IM_COL32(84, 89, 102, 240));
+            // Right compound cell
+            if (active) f1_grad_rect(dl, ImVec2(x0 + cell_w, ry0), ImVec2(x1, ry1), IM_COL32(46, 52, 64, 238), IM_COL32(24, 27, 36, 244));
+            else f1_grad_rect(dl, ImVec2(x0 + cell_w, ry0), ImVec2(x1, ry1), IM_COL32(28, 30, 36, 224), IM_COL32(12, 14, 18, 236));
+            // Colored compound stripe on the right edge
+            dl->AddRectFilled(ImVec2(x1 - (active ? 6.0f : 3.5f) * S, ry0 + 2 * S), ImVec2(x1 - 1 * S, ry1 - 2 * S), col);
+
+            const float dw = text_w(F.medium, sz_dir, rows[i].dir);
+            if (active) text(dl, F.medium, sz_dir, ImVec2(x0 + (cell_w - dw) * 0.5f, ry0 + 4.5f * S), IM_COL32(22, 25, 32, 255), rows[i].dir);
+            else f1_shadow_text(dl, F.medium, sz_dir, ImVec2(x0 + (cell_w - dw) * 0.5f, ry0 + 4.5f * S), WHITE, rows[i].dir, S);
+
+            f1_shadow_text(dl, F.medium, sz_val, ImVec2(x0 + cell_w + 10 * S, ry0 + 3 * S), active ? col : SILVER, rows[i].name, S);
+            if (active) {
+                const float sw = text_w(F.medium, sz_note, "NEXT");
+                f1_shadow_text(dl, F.medium, sz_note, ImVec2(x1 - 11 * S - sw, ry0 + 4.5f * S), col, "NEXT", S);
+            }
+            dl->AddLine(ImVec2(x0, ry0), ImVec2(x1, ry0), IM_COL32(18, 20, 26, 210), 1.0f);
+        }
+        dl->AddLine(ImVec2(x0 + cell_w, y0 + hdr_h), ImVec2(x0 + cell_w, y0 + hdr_h + row_h * 4), IM_COL32(18, 20, 26, 200), 1.0f);
+
+        if (!g_mfd_ov.note.empty()) {
+            const float ny0 = y0 + hdr_h + row_h * 4;
+            f1_grad_rect(dl, ImVec2(x0, ny0), ImVec2(x1, y1), IM_COL32(62, 68, 86, 236), IM_COL32(42, 46, 60, 240));
+            dl->AddLine(ImVec2(x0, ny0), ImVec2(x1, ny0), IM_COL32(18, 20, 26, 210), 1.0f);
+            const float nw = text_w(F.medium, sz_note, g_mfd_ov.note.c_str());
+            f1_shadow_text(dl, F.medium, sz_note, ImVec2(x0 + (bw - nw) * 0.5f, ny0 + 3 * S), SILVER, g_mfd_ov.note, S);
+        }
+        f1_frame(dl, ImVec2(x0, y0), ImVec2(x1, y1), S);
+        cur_y = y1 + 6 * S;
+    } else if (pinned_tyre) {
+        // Compact 1-row 2006 F1 reminder badge when a non-AUTO pit tyre is queued
+        const float bh = 23 * S, tag_w = 64 * S;
+        const float y0 = cur_y, y1 = y0 + bh;
+        f1_grad_rect(dl, ImVec2(x0, y0), ImVec2(x0 + tag_w, y1), IM_COL32(242, 244, 248, 240), IM_COL32(204, 209, 218, 240));
+        f1_grad_rect(dl, ImVec2(x0 + tag_w, y0), ImVec2(x1, y1), IM_COL32(30, 33, 40, 228), IM_COL32(14, 16, 20, 238));
+        dl->AddRectFilled(ImVec2(x1 - 5 * S, y0 + 2 * S), ImVec2(x1 - 1 * S, y1 - 2 * S), tyre_col);
+        dl->AddLine(ImVec2(x0 + tag_w, y0), ImVec2(x0 + tag_w, y1), IM_COL32(18, 20, 26, 200), 1.0f);
+
+        const float sz_tag = 12.5f * S, sz_val = 14.5f * S;
+        const float tw = text_w(F.medium, sz_tag, "NEXT PIT");
+        text(dl, F.medium, sz_tag, ImVec2(x0 + (tag_w - tw) * 0.5f, y0 + 4.5f * S), IM_COL32(22, 25, 32, 255), "NEXT PIT");
+        f1_shadow_text(dl, F.medium, sz_val, ImVec2(x0 + tag_w + 10 * S, y0 + 3.5f * S), tyre_col, g_mfd_ov.tyre_label, S);
+        f1_frame(dl, ImVec2(x0, y0), ImVec2(x1, y1), S);
+        cur_y = y1 + 6 * S;
+    }
+
+    if (aid_toast) {
+        // Optional keyboard-only TC / ABS quick toast (F6 / F7)
+        const float bh = 23 * S, tag_w = 48 * S;
+        const float y0 = cur_y, y1 = y0 + bh;
+        f1_grad_rect(dl, ImVec2(x0, y0), ImVec2(x0 + tag_w, y1), IM_COL32(242, 244, 248, 240), IM_COL32(204, 209, 218, 240));
+        f1_grad_rect(dl, ImVec2(x0 + tag_w, y0), ImVec2(x1, y1), IM_COL32(30, 33, 40, 228), IM_COL32(14, 16, 20, 238));
+        dl->AddLine(ImVec2(x0 + tag_w, y0), ImVec2(x0 + tag_w, y1), IM_COL32(18, 20, 26, 200), 1.0f);
+
+        const float sz_tag = 12.5f * S, sz_val = 14.5f * S;
+        const float tw = text_w(F.medium, sz_tag, g_mfd_ov.aid_tag.c_str());
+        text(dl, F.medium, sz_tag, ImVec2(x0 + (tag_w - tw) * 0.5f, y0 + 4.5f * S), IM_COL32(22, 25, 32, 255), g_mfd_ov.aid_tag);
+        f1_shadow_text(dl, F.medium, sz_val, ImVec2(x0 + tag_w + 10 * S, y0 + 3.5f * S), g_mfd_ov.aid_green ? GREEN : AMBER, g_mfd_ov.aid_val, S);
+        f1_frame(dl, ImVec2(x0, y0), ImVec2(x1, y1), S);
     }
 }
 
@@ -887,6 +1150,22 @@ void toggle_laptimes() {
     LOG_I("overlay: fastest lap overlay %s", now_on ? "on" : "off");
 }
 
+void set_penalty_banner(const PenaltyBanner& b) {
+    std::lock_guard lk(g_m);
+    g_pen = b;
+    g_pen_expires.store(b.expires_at_us);
+    g_pen_active.store(b.active && !b.title.empty());
+}
+
+void set_mfd_state(const MfdState& s) {
+    std::lock_guard lk(g_m);
+    g_mfd_ov = s;
+    g_mfd_tyre_code.store(s.tyre_code);
+    g_mfd_popup_until.store(s.popup_until_us);
+    g_mfd_aid_until.store(s.aid_until_us);
+    g_mfd_visible.store(s.visible);
+}
+
 bool frame(u32 win_w, u32 win_h, Image* out) {
     static u64 last = 0;
     const u64 now = time_usec();
@@ -902,7 +1181,29 @@ bool frame(u32 win_w, u32 win_h, Image* out) {
     }
     const bool fps_on = g_fps_on.load();
     const bool lap_on = g_lap_on.load() && g_lap.in_session;
-    if (!g_open.load() && !g_bar_active.load() && !fps_on && !lap_on) return false;
+    const u64 pen_exp = g_pen_expires.load();
+    const bool pen_was_active = g_pen_active.load();
+    bool pen_on = pen_was_active && g_lap.in_session && (!pen_exp || now < pen_exp);
+    if (pen_was_active && (!g_lap.in_session || (pen_exp && now >= pen_exp))) {
+        std::lock_guard lk(g_m);
+        g_pen = {};
+        g_pen_active = false;
+        g_pen_expires = 0;
+        pen_on = false;
+    }
+    const u64 mfd_until = g_mfd_popup_until.load();
+    const u64 mfd_aid_until = g_mfd_aid_until.load();
+    const bool mfd_vis = g_mfd_visible.load() && g_lap.in_session;
+    const bool mfd_on = mfd_vis && ((mfd_until && now < mfd_until) || (mfd_aid_until && now < mfd_aid_until) || g_mfd_tyre_code.load() != 0);
+    if (g_mfd_visible.load() && !g_lap.in_session) {
+        std::lock_guard lk(g_m);
+        g_mfd_ov = {};
+        g_mfd_visible = false;
+        g_mfd_tyre_code = 0;
+        g_mfd_popup_until = 0;
+        g_mfd_aid_until = 0;
+    }
+    if (!g_open.load() && !g_bar_active.load() && !fps_on && !lap_on && !pen_on && !mfd_on) return false;
     std::lock_guard lk(g_m);
     static bool inited = false;
     bool dialog = g_open.load() && g_st.kind != Kind::None;
@@ -917,7 +1218,7 @@ bool frame(u32 win_w, u32 win_h, Image* out) {
         bar_mouse((float)win_w, (float)win_h);
         show_bar = bar_visible((float)win_w, (float)win_h);
     }
-    if (!dialog && !show_bar && !fps_on && !lap_on) return false;
+    if (!dialog && !show_bar && !fps_on && !lap_on && !pen_on && !mfd_on) return false;
     if (!inited) { imgui_init(); inited = true; }
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)win_w, (float)win_h);
@@ -929,6 +1230,8 @@ bool frame(u32 win_w, u32 win_h, Image* out) {
     else if (show_bar) draw_bar(dl, (float)win_w, (float)win_h);
     if (fps_on) draw_fps(dl, (float)win_w, (float)win_h);
     if (lap_on && !dialog) draw_laptimes(dl, (float)win_w, (float)win_h);
+    if (mfd_on && !dialog) draw_mfd(dl, (float)win_w, (float)win_h, now, lap_on);
+    if (pen_on && !dialog) draw_penalty_banner(dl, (float)win_w, (float)win_h);
     ImGui::Render();
     ImDrawData* dd = ImGui::GetDrawData();
     bool tex_changed = false;
