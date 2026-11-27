@@ -163,8 +163,8 @@ Combo g_combos[] = {
      L"Accelerates dry tyre wear (soft faster than hard) and increases end-of-stint grip drop for both player and AI "
      L"(1.5x is ideal for 50% scaled races; 2.0x-2.5x suits 100% races)."},
     {L"Soft tyre grip", L"F1CE_SOFT_GRIP",
-     {{L"On (realistic Soft pace)", nullptr},
-      {L"Off (original PS3)", L"0"}}, 0, GAME,
+     {{L"Off (original PS3)", nullptr},
+      {L"On (realistic Soft pace)", L"1"}}, 0, GAME,
      L"Boosts fresh Dry Soft peak grip by +4.2% (~0.9-1.2 s/lap faster than Hard when new) so the Soft vs Hard "
      L"speed/wear trade-off is genuinely worthwhile in qualifying and races."},
     {L"Penalty system", L"F1CE_PENALTY_MODE",
@@ -181,9 +181,9 @@ Combo g_combos[] = {
      L"Enables full native mechanical failures (engine power loss + smoke blowout, gearbox, hydraulics, suspension) on "
      L"the player's car in races, scaled from 2006 team reliability."},
     {L"On-track MFD", L"F1CE_ONTRACK_MFD",
-     {{L"On (D-Pad tyres + F5/F6/F7)", nullptr},
-      {L"Keyboard only (F5/F6/F7)", L"keyboard"},
-      {L"Off (original)", L"0"}}, 0, GAME,
+     {{L"Off (original)", nullptr},
+      {L"On (D-Pad tyres + F5/F6/F7)", L"1"},
+      {L"Keyboard only (F5/F6/F7)", L"keyboard"}}, 0, GAME,
      L"On-track Pit Tyre MFD while driving: D-Pad Up=SOFT, Down=HARD, Left=INTER, Right=WET (tap again=AUTO). "
      L"Keyboard: F5 pit tyres, F6 Traction Control, F7 ABS. Menus and pause stay normal."},
     // in-game cameras (runtime/hle_camera.cpp): the second TV pod camera of the view cycle as a broadcast T-cam, and

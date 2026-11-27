@@ -37,7 +37,7 @@ MfdMode mfd_mode() {
     static const MfdMode mode = [] {
         if (g_online_image) return MfdMode::off;
         const char* e = getenv("F1CE_ONTRACK_MFD");
-        if (!e || !*e) return MfdMode::full;   // enabled by default (gamepad D-Pad tyres + F5/F6/F7)
+        if (!e || !*e) return MfdMode::off;   // off by default (1: gamepad D-Pad tyres + F5/F6/F7)
         std::string s(e);
         for (char& ch : s) ch = (char)tolower((unsigned char)ch);
         if (s == "0" || s == "off" || s == "false") return MfdMode::off;

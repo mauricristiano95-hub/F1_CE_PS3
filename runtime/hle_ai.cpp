@@ -937,16 +937,13 @@ bool ai_wet_speed_hook(PPUContext& c) {
 }
 
 // Retail dynamics.bin section 9 gives Dry Soft only +2.28% more peak grip than Hard (1.79 vs 1.75 -> ~0.35-0.45 s/lap
-// fresh), making Soft strictly worse than Hard once realistic tyre wear is active. F1CE_SOFT_GRIP (default ON: 1.042x,
+// fresh), making Soft strictly worse than Hard once realistic tyre wear is active. F1CE_SOFT_GRIP (default off; 1: 1.042x,
 // lifting effective peak grip to ~1.865 vs 1.75 = +6.6% -> ~0.9-1.2 s/lap faster when new) makes the Soft vs Hard
 // speed/wear trade-off genuinely worthwhile in qualifying, undercuts and multi-stop races.
 float soft_grip_boost() {
     static const float boost = [] {
         const char* e = getenv("F1CE_SOFT_GRIP");
-        if (!e || !*e) {
-            LOG_I("tyre_grip: realistic Dry Soft peak grip active (+4.2%% -> ~1.865 vs Hard 1.75)");
-            return 1.042f;
-        }
+        if (!e || !*e) return 1.0f;   // (off by default: the original grip)
         std::string s(e);
         for (char& ch : s) ch = (char)tolower((unsigned char)ch);
         if (s == "0" || s == "off" || s == "original") return 1.0f;
