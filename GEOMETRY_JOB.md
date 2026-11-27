@@ -362,7 +362,16 @@ run ~5.7 us (op0 2.1, job entry 0.9, op37 0.46, op12 0.44, op35 0.31, op4 0.30, 
   the positions / triangles of set 1 (the elements holding them, slack bytes copied) and reading them from main memory
   in the native job: exact, 64% of the gathered bytes left in main memory, but no change in setup time (the cull
   takes the cache misses the copy took). Lesson: a stray non-static getenv in a per-job path cost 4 us per job.
-- Left: op0 (2.1 us, ~1100 instructions + ring / flush / DMA helpers: the completion protocol), op37 (its first
+- op0 (0x8C80): ~1560 SPU instructions a call (`F1CE_GEOM_OP_PROF` slot 29 counts them). Per-word counts
+  (`F1CE_SPU_NOBLOCK=1 F1CE_GEOM_PC_HIST=1` -> op0_hist.txt; note this mode bypasses the idioms, so loops that have one,
+  0x4AE4 zeroing and 0x8910 vertex table, look hot there but are not) showed two loops worth an idiom: the vertex-record
+  scan at 0x8E08 (8 sets, all records 0 in covered jobs: `spu_idiom_skip_records`) and a 128-byte word copy at 0x9838
+  (`spu_idiom_copy_words`); both run all but the last iteration natively, so the registers stay exact. op0 2.07 ->
+  1.58 us (instructions -25%); NJ=2 171k jobs, 0 differences. What is left in op0 is ~1000 instructions of straight
+  code over the whole protocol (command block, done-record windows, in-order kick); the remaining loops (6 done
+  records, 0x9108 / 0x9138) are worth ~50 ns. A native op0 would save another ~1 us a job at the risk of the
+  completion protocol.
+- Left: op0's protocol (see above), op37 (its first
   allocation initialises the output buffer through the job manager's services +0x30 / +0x34), the job's entry (0.9).
   The SpinLock in the profile (2.6%) is contention on the queue / in-order line atomics.
 

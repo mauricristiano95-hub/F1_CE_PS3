@@ -644,6 +644,25 @@ template <class S> void spu_idiom_ramp_u16(S& s) {
     for (u32 k = 0; k < bulk; k++) p[k] = __builtin_bswap16((u16)((i + k) << 4));
     add_all_words(s, 7, bulk);
 }
+// 09838 (geometry job op0): for (i = r3; i != 128; i += 4) *(u32*)(r14 + i) = *(u32*)(r82 + i)
+template <class S> void spu_idiom_copy_words(S& s) {
+    const u32 i = s.pref(3), d = (s.pref(14) + i) & 0x3FFFF, a = (s.pref(82) + i) & 0x3FFFF;
+    if (!g_spu_idiom || i >= 128 || (i & 3) || (d & 3) || (a & 3)) return;
+    const u32 bulk = (128 - i) / 4 - 1;
+    if (!bulk || !ls_plain_range(s, d, bulk * 4) || a + bulk * 4 > 0x40000) return;
+    memmove(s.ls + d, s.ls + a, bulk * 4);
+    add_all_words(s, 3, bulk * 4);
+}
+// 08e08 (geometry job op0): the vertex records ctx[864 + 4k] (r10) with their format sets (r13 = 2k): a set whose record
+// is 0 is skipped (r13 += 2, r10 += 4); all but the last (k = 7) here, the loop runs the rest
+template <class S> void spu_idiom_skip_records(S& s) {
+    if (!g_spu_idiom) return;
+    u32 k = s.pref(13), r = s.pref(10), n = 0;
+    while (k + 2 * n < 14 && !(k & 1) && s.ls32((r + 4 * n) & 0x3FFFC) == 0) n++;
+    if (!n) return;
+    add_all_words(s, 13, 2 * n);
+    add_all_words(s, 10, 4 * n);
+}
 // 0e3f0: per quad q of [r5 + r80, r5 + r8): x = q - r6 (halfwords); q = (x & r7) > r9 ? r7 : x, bitwise per halfword
 template <class S> void spu_idiom_age_table(S& s) {
     u32 o = s.pref(80), end = s.pref(8), a = (o + s.pref(5)) & 0x3FFFF;

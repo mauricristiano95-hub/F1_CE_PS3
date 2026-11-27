@@ -4340,6 +4340,7 @@ L_08df8:
     s.instructions++; op_ceqi(s, 0x7C040682u);   // 08e00 ceqi r2,r13,16
     s.instructions++; if (s.pref(2) != 0) { goto L_08f00; }   // 08e04 brnz r2,0x8f00
 L_08e08:
+    spu_idiom_skip_records(s);   // (bulk iterations of the loop, as the translated code runs them)
     s.instructions++; op_lqd(s, 0x34000802u);   // 08e08 lqd r2,0(r16)
     s.instructions++; op_lqd(s, 0x34000503u);   // 08e0c lqd r3,0(r10)
     s.instructions++; op_rotqby(s, 0x3B840104u);   // 08e14 rotqby r4,r2,r16
@@ -5049,6 +5050,7 @@ L_09808:
 L_09830:
     s.instructions++; op_il(s, 0x40800003u);   // 09830 il r3,0x0
 L_09838:
+    spu_idiom_copy_words(s);   // (bulk iterations of the loop, as the translated code runs them)
     s.instructions++; op_a(s, 0x1800E906u);   // 09838 a r6,r82,r3
     s.instructions++; op_lqx(s, 0x3880E904u);   // 0983c lqx r4,r82,r3
     s.instructions++; op_lqx(s, 0x3880C702u);   // 09840 lqx r2,r14,r3

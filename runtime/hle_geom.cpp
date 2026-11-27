@@ -41,6 +41,7 @@ bool geom_nj_kept(const u8* set1, u32 set1_size, std::vector<u16>& kept, u32& pa
 bool geom_sk_shape(const u8* set1, u32 set1_size);   // geom_skin_job.cpp: skinned pieces
 bool geom_sk_handler(SPUThread& s, u32 handler);
 void geom_sk_report();
+extern thread_local std::atomic<u32>* t_spu_pc_hist;   // spu.cpp
 extern thread_local bool t_geom_list_dead;
 extern thread_local u32 t_geom_list_kept;
 extern bool g_geom_op_prof;   // below (F1CE_GEOM_OP_PROF)
@@ -89,6 +90,7 @@ thread_local u16 t_nj_pad_abc[3];
 thread_local bool t_sk = false;   // the running job is a skinned piece with native handlers (geom_skin_job.cpp)
 
 bool nj_handler(SPUThread& s, u32 handler);
+std::atomic<u32> g_pc_hist[0x10000];   // F1CE_GEOM_PC_HIST (dumped to op0_hist.txt with the report)
 // debug (F1CE_GEOM_NJ_REGDIFF): registers at each handler entry, recorded in the original run and compared in the native one
 struct RegCap { u32 handler; v128 gpr[128]; };
 thread_local std::vector<RegCap>* t_cap = nullptr;
@@ -141,11 +143,14 @@ bool nj_list(SPUThread& s) {
         s.gpr[1].pi = _mm_add_epi32(r1.pi, _mm_set1_epi32(-448));   // (every word, as ai r1,r1,-448)
         s.set_pref(0, 0x5C88);
         const u32 handler = s.ls32(0x12180 + 4 * op) & 0x3FFFC;
-        const u64 prof_t0 = g_geom_op_prof ? __rdtsc() : 0;
+        const u64 prof_t0 = g_geom_op_prof ? __rdtsc() : 0, prof_i0 = s.instructions;
         if (t_cmp) reg_capture(s, handler);
         if (!nj_handler(s, handler)) {
             s.pc = handler;
+            static const bool hist = getenv("F1CE_GEOM_PC_HIST") != nullptr;   // debug: op0's instructions per word
+            if (hist && op == 0) t_spu_pc_hist = g_pc_hist;
             s.run_until(0x5C88);
+            t_spu_pc_hist = nullptr;
             if (s.halted || s.pc != 0x5C88) fatal("geom nj: handler %05x of command %u did not return (pc %05x)", handler, op, s.pc);
         {
             static std::atomic<int> dbg2{0};
@@ -154,6 +159,7 @@ bool nj_list(SPUThread& s) {
         }
         }
         if (prof_t0) geom_op_prof(handler, __rdtsc() - prof_t0);
+        if (prof_t0 && op == 0) geom_op_prof(29, s.instructions - prof_i0);   // (slot 29: SPU instructions of op0, as "ticks")
         s.ls32(ctx + 352, s.ls32(ctx + 352) + 2 * s.ls[0x12230 + op]);
         if (op == 0) break;
     }
@@ -774,7 +780,10 @@ struct Pool {
             t_nj_kept = nj_on ? &nj_kept : nullptr;
             if (nj_on) nj_stream();
             t_job_t0 = prof_t1; t_list_end = 0;
+            static const bool hist = getenv("F1CE_GEOM_PC_HIST") != nullptr;
+            if (hist) t_spu_pc_hist = g_pc_hist;
             t.run_until(~0u);
+            t_spu_pc_hist = nullptr;
             if (prof_t1 && t_list_end) geom_op_prof(28, __rdtsc() - t_list_end);
             t_nj_kept = nullptr;
         }
@@ -919,7 +928,7 @@ std::atomic<u64> g_op_tsc[42], g_op_n[42];
 void geom_op_prof(u32 handler, u64 tsc) {
     u32 i = 0;   // (handler 1 / 2: the native transform / cull loops, counted under op1 / op2: those opcodes never run)
     while (i < 41 && OP_HANDLERS[i] != handler) i++;
-    if ((handler >= 1 && handler <= 7) || (handler >= 16 && handler <= 18) || (handler >= 26 && handler <= 28)) i = handler;   // (opcodes never run)
+    if ((handler >= 1 && handler <= 7) || (handler >= 16 && handler <= 18) || (handler >= 26 && handler <= 29)) i = handler;   // (opcodes never run)
     g_op_tsc[i].fetch_add(tsc, std::memory_order_relaxed);
     g_op_n[i].fetch_add(1, std::memory_order_relaxed);
 }
@@ -954,6 +963,11 @@ void geom_hle_report() {
               (unsigned long long)g_nj_used.load(), (unsigned long long)g_nj_op35.load(), (unsigned long long)g_nj_declined.load(),
               (unsigned long long)g_nj_twice_same.load(), (unsigned long long)g_nj_twice_differ.load());
     geom_sk_report();
+    if (getenv("F1CE_GEOM_PC_HIST"))
+        if (FILE* f = fopen("op0_hist.txt", "w")) {
+            for (u32 i = 0; i < 0x10000; i++) if (const u32 n = g_pc_hist[i].load()) fprintf(f, "%05x %u\n", i * 4, n);
+            fclose(f);
+        }
     if (g_nj_same.load() + g_nj_differ.load() + g_nj_declined.load())
         LOG_I("geom nj check: %llu same, %llu differ, %llu declined", (unsigned long long)g_nj_same.load(),
               (unsigned long long)g_nj_differ.load(), (unsigned long long)g_nj_declined.load());

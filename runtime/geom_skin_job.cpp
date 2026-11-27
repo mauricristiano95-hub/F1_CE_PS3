@@ -33,6 +33,16 @@ inline float u2f_(u32 v) { float f; memcpy(&f, &v, 4); return f; }
 std::atomic<u64> g_sk_jobs{0}, g_sk_native[41], g_sk_same{0}, g_sk_differ{0};
 const bool g_check = getenv("F1CE_GEOM_SK_CHECK") != nullptr;
 
+// 0x8970 with r4 = 1 and no table yet (ctx[928] = 0): nv8 halfwords v << 4 at the bump pointer, 2 * ((nv + 31) & ~15)
+// bytes (0x41C0: word 0 of ctx[272]), ctx[928] = table, ctx[932] = nv, ctx[936] = -1 (0x88E0)
+void vertex_table(SPUThread& s, u32 ctx) {
+    const u32 nv = s.ls32(ctx + 376), nv8 = (nv + 7) & ~7u, tab = s.ls32(ctx + 272);
+    s.ls32(ctx + 272, tab + ((2 * ((nv + 31) & ~15u) + 15) & ~15u));
+    for (u32 v = 0; v < nv8; v++) wbe16(s.ls + ((tab + 2 * v) & 0x3FFFF), v << 4);
+    s.ls32(ctx + 928, tab);
+    s.ls32(ctx + 932, nv);
+    s.ls32(ctx + 936, ~0u);
+}
 // op40: see the header
 bool op40(SPUThread& s) {
     const u32 ctx = s.pref(3) & 0x3FFF0;
@@ -46,13 +56,7 @@ bool op40(SPUThread& s) {
     const u32 start = s.ls32(ctx + 308 + (s.ls32(ctx + 304) & ~3u)) & 0x3FFFF;
     if (!start || size > start - out + 0x7800 || n > 7) return false;
     if (pos + 16 * nv4 > 0x40000 || nrm + 16 * nv4 > 0x40000 || out + size > 0x40000) return false;
-    // the table (0x8970)
-    const u32 tab = s.ls32(ctx + 272);
-    s.ls32(ctx + 272, tab + ((2 * ((nv + 31) & ~15u) + 15) & ~15u));
-    for (u32 v = 0; v < nv8; v++) wbe16(s.ls + ((tab + 2 * v) & 0x3FFFF), v << 4);
-    s.ls32(ctx + 928, tab);
-    s.ls32(ctx + 932, nv);
-    s.ls32(ctx + 936, ~0u);
+    vertex_table(s, ctx);
     // the vertices
     u8* o = s.ls + out;
     for (u32 v = 0; v < nv4; v++, o += 18) {
