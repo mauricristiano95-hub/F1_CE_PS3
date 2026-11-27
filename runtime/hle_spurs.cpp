@@ -27,6 +27,16 @@ extern std::atomic<u32> g_pm_skip_run_max;
 bool geom_hle_claims(u32 queue);                            // hle_geom.cpp: w1 / w2 outside SPURS (F1CE_GEOM_HLE)
 void geom_hle_add(u32 spurs, u32 wid, u32 queue);
 u32 geom_hle_run(u32 num, u32 wid, u32 queue, bool (*yield)(u32 wid));
+extern thread_local std::atomic<u32>* t_spu_pc_hist;   // spu.cpp (F1CE_WKL_PC_HIST)
+extern thread_local u32* t_spu_pc_word;
+std::atomic<u32> g_wkl_hist[0x10000];
+u32 g_wkl_word[0x10000];
+void wkl_hist_dump() {
+    if (FILE* f = fopen("wkl_hist.txt", "w")) {
+        for (u32 i = 0; i < 0x10000; i++) if (const u32 n = g_wkl_hist[i].load()) fprintf(f, "%05x %u %08x\n", i * 4, n, g_wkl_word[i]);
+        fclose(f);
+    }
+}
 void geom_hle_report();
 void geom_hle_dump();
 std::atomic<int> g_worker_wid[8] = {-1, -1, -1, -1, -1, -1, -1, -1};   // profiling (F1CE_PROFILE): workload each SPU worker runs
@@ -208,7 +218,12 @@ u64 run_workload(SPUThread& spu, u32 wid, const Workload& w) {
     std::vector<u32> trace;
     if ((int)wid == trace_wkl) spu.pc_trace = &trace;
     g_spu_by_wkl[wid] = &spu;
+    // debug (F1CE_WKL_PC_HIST=<wid>, with F1CE_SPU_NOBLOCK=1): per-word instruction counts of that workload's runs,
+    // written to wkl_hist.txt (address, count, instruction word) with the SPURS report
+    static const int hist_wkl = getenv("F1CE_WKL_PC_HIST") ? atoi(getenv("F1CE_WKL_PC_HIST")) : -1;
+    if ((int)wid == hist_wkl) { t_spu_pc_hist = g_wkl_hist; t_spu_pc_word = g_wkl_word; }
     spu.run();
+    t_spu_pc_hist = nullptr; t_spu_pc_word = nullptr;
     g_spu_by_wkl[wid] = nullptr;
     spu.pc_trace = nullptr;
     if ((int)wid == trace_wkl) {
@@ -441,7 +456,7 @@ void spu_worker(u32 num) {
                 for (u32 i = 0; i < 16; i++)
                     if (u32 n = g_ready_calls[i].load()) { char b[24]; snprintf(b, sizeof(b), " w%u:%u", i, n); rc += b; }
                 LOG_I("SPURS ready-count stores:%s", rc.c_str());
-                geom_hle_report();
+                geom_hle_report(); if (getenv("F1CE_WKL_PC_HIST")) wkl_hist_dump();
                 auto dump = [](const char* what, u32 ea, u32 n) {
                     std::string h;
                     for (u32 k = 0; k < n; k += 4) { char b[12]; snprintf(b, sizeof(b), "%s%08x", k % 32 ? " " : " | ", ld32(ea + k)); h += b; }
