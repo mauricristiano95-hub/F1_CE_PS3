@@ -382,7 +382,10 @@ run ~5.7 us (op0 2.1, job entry 0.9, op37 0.46, op12 0.44, op35 0.31, op4 0.30, 
   store compared; a run that waits for another SPU (the snapshot does not move) is stopped after a few GETLLARs and
   only the commands up to there are compared: 1.03M runs, 0 differences, ~200 waits, all alike. Not reachable in the
   dry mode (its conditional stores succeed): the retries after a lost reservation (ring and lock: back to the
-  GETLLAR, read in the code). op0 1.58 -> 0.73 us, the job's run 5.7 -> 3.5 us.
+  GETLLAR, read in the code). op0 1.58 -> 0.73 us, the job's run 5.7 -> 3.5 us. Carbench pairs (`F1CE_GEOM_OP0=0`
+  / 1): stress 49.4 / 49.4 / 49.3 -> 50.8 / 50.9 / 50.4 fps, SPU workers -0.2 cores; 4 CPUs 38.9 / 39.5 / 38.4 ->
+  41.2 / 42.5 / 41.5 fps (+7%). Scenarios clean: 150 s race, heavy rain, Monaco, OpenGL Monza, 60 fps LOD0 (two
+  first attempts died before any geometry job: the known OpenGL boot FIFO fault and the MP3 read fault).
 - Left: op37 (its first
   allocation initialises the output buffer through the job manager's services +0x30 / +0x34), the job's entry (0.9).
   The SpinLock in the profile (2.6%) is contention on the queue / in-order line atomics.
