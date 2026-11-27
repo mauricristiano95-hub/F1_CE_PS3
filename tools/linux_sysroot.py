@@ -29,6 +29,9 @@ PACKAGES = [
     "libxrender1", "libxss-dev", "libxss1", "libxtst-dev", "libxtst6",
     "libpulse-dev", "libpulse0", "libasound2-dev", "libasound2", "libudev-dev", "libudev1",
     "libdbus-1-dev", "libdbus-1-3", "libxcb1-dev", "libxcb1", "libx11-xcb-dev", "libx11-xcb1",
+    # OpenGL headers: without GL/gl.h + GL/glext.h SDL's configure check fails and it builds without OpenGL (the
+    # OpenGL renderer then gets no window: black screen on Linux / the Steam Deck); SDL loads libGL at run time
+    "mesa-common-dev", "libegl1-mesa-dev",
 ]
 # parts of each package that are kept (headers, shared objects, pkg-config files)
 KEEP = ("usr/include/", "usr/lib/x86_64-linux-gnu/", "lib/x86_64-linux-gnu/", "usr/share/pkgconfig/")
