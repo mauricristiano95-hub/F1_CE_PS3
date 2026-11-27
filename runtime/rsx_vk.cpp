@@ -45,6 +45,7 @@
 #include <vector>
 
 extern u64 g_rsx_idle_us;   // hle_gcm.cpp: time the FIFO reader waited for commands (profiling)
+bool gfx_skip_program(u64 fh);   // hle_gfxopts.cpp: draws left out (motion blur off: its plain copy pass)
 namespace rsx {
 namespace vk {
 void zpass_service();
@@ -114,7 +115,7 @@ void check(VkResult r, const char* what) {
 
 // ------------------------------------------------------------------ submissions
 // Every command buffer pair has a serial; the timeline semaphore counts the finished ones.
-constexpr u32 SLOTS = 8, QUERIES = 4096, STAMPS = 512;
+constexpr u32 SLOTS = 8, QUERIES = 4096, STAMPS = 4096;
 struct Slot {
     VkCommandPool pool = 0;
     VkCommandBuffer cb = 0, ucb = 0;   // draws; uploads, which run first
@@ -135,6 +136,10 @@ VkCommandBuffer g_cb, g_ucb;
 // the next one is charged to the label: a pass's target (offset, size, antialiased), GPU_UPLOADS (the upload command buffer,
 // which runs first) or GPU_OTHER (resolves, copies, clears and presentation between passes).
 constexpr u64 GPU_UPLOADS = 0, GPU_OTHER = 1;
+// F1CE_GPU_DRAW_PROF=1: inside the passes, a timestamp whenever the program changes; such labels have bit 63 set
+// (vertex program id, fragment hash), and g_draw_tex keeps the texture of unit 0 at their first draw
+const bool g_draw_prof = getenv("F1CE_GPU_DRAW_PROF") != nullptr;
+std::unordered_map<u64, std::pair<u32, u32>> g_draw_tex;   // (texture of unit 0, target)
 bool g_ts_ok = false;
 void gpu_mark(u64 label) {
     Slot& s = g_slots[g_slot];
@@ -1289,6 +1294,29 @@ Img* upload_texture(u32 unit, bool* is_surface, int* depth_func) {
     te.checked_frame = g_frame;
     te.sentinel = !linear && size > 16384 ? hash_range(gmem(ea), size, size > 65536 ? 1024 : 256) | 1 : 0;
     if (te.tex && te.hash == hsh) return te.tex;
+    // debug (F1CE_TEX_UPLOAD_LOG=1): the textures whose contents change most often, every 300 frames
+    static const bool up_log = getenv("F1CE_TEX_UPLOAD_LOG") != nullptr;
+    if (up_log) {
+        struct Up { u32 n = 0, ea, fmt, w, h, size; bool main; };
+        static std::unordered_map<u64, Up> ups;
+        static u64 next = 0;
+        Up& u = ups[key];
+        u.n++; u.ea = ea; u.fmt = fmt; u.w = w; u.h = h; u.size = size; u.main = main_mem;
+        if (g_frame >= next) {
+            next = g_frame + 300;
+            std::vector<Up> v;
+            for (auto& [k, x] : ups) v.push_back(x);
+            std::sort(v.begin(), v.end(), [](const Up& a, const Up& b) { return (u64)a.n * a.size > (u64)b.n * b.size; });
+            std::string o;
+            char b[96];
+            for (size_t i = 0; i < v.size() && i < 12; i++) {
+                snprintf(b, sizeof(b), " [%08x fmt %02x %ux%u %u KB %s x%u]", v[i].ea, v[i].fmt, v[i].w, v[i].h, v[i].size >> 10, v[i].main ? "main" : "local", v[i].n);
+                o += b;
+            }
+            LOG_I("tex uploads (300 frames, by bytes):%s", o.c_str());
+            ups.clear();
+        }
+    }
     te.last_change = g_frame;
     te.hash = hsh;
     u32 levels = std::max(1u, (format >> 16) & 0xF);
@@ -1829,6 +1857,20 @@ void draw(bool indexed) {
         vkCmdBindDescriptorSets(g_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_pl, 0, 1, &g_set0, 3, dyn);
         memcpy(g_dyn.set0, dyn, sizeof(dyn));
     }
+    static const u64 skip_fp = getenv("F1CE_SKIP_FP") ? strtoull(getenv("F1CE_SKIP_FP"), nullptr, 16) : 0;   // debug: one program's draws left out
+    if ((skip_fp && (p->fh & 0xFFFFFFFFFFFFull) == skip_fp) || gfx_skip_program(p->fh)) return;   // (hle_gfxopts.cpp)
+    if (g_draw_prof) {
+        const u64 lab = 1ull << 63 | (u64)(p->vs_id & 0x7FFF) << 48 | (p->fh & 0xFFFFFFFFFFFFull);
+        Slot& sl = g_slots[g_slot];
+        if (!sl.tused || sl.tlabel[sl.tused - 1] != lab) {
+            gpu_mark(lab);
+            if (g_draw_tex.emplace(lab, std::make_pair(reg(0x1A00), target->offset)).second && p->fs) {   // the shader, once
+                char fn[48];
+                snprintf(fn, sizeof(fn), "fp%012llx.glsl", (unsigned long long)(lab & 0xFFFFFFFFFFFFull));
+                if (FILE* f = fopen(fn, "w")) { fputs(p->fs->c_str(), f); fclose(f); }
+            }
+        }
+    }
     u64 tdr = prof_usec();
     vkCmdDrawIndexed(g_cb, geom.idx_count, 1, (u32)(geom.idx_offset / 4), 0, 0);
     g_prof.t_draw += prof_usec() - tdr;
@@ -1969,7 +2011,13 @@ std::unordered_map<u64, GpuPass> g_gpu_passes;
 std::string gpu_label(u64 k) {
     if (k == GPU_UPLOADS) return "uploads";
     if (k == GPU_OTHER) return "between passes";
-    char b[48];
+    char b[80];
+    if (k >> 63) {
+        auto it = g_draw_tex.find(k);
+        snprintf(b, sizeof(b), "fp%012llx tex0 %08x -> %08x", (unsigned long long)(k & 0xFFFFFFFFFFFFull), it != g_draw_tex.end() ? it->second.first : 0,
+                 it != g_draw_tex.end() ? it->second.second : 0);
+        return b;
+    }
     snprintf(b, sizeof(b), "%08x %ux%u%s", (u32)(k >> 32), (u32)(k >> 18 & 0x3FFF), (u32)(k >> 4 & 0x3FFF), k & 2 ? " msaa" : "");
     return b;
 }
@@ -2989,6 +3037,7 @@ void flip(u32 ea, u32 pitch, u32 width, u32 height) {
                 LOG_I("perf gpu: busy %.1f ms per frame (%.0f%% of the time), longest submission %.1f ms", g_gpu_busy_ns / nf / 1e6,
                       g_gpu_busy_ns / 10.0 / wall, g_gpu_max_ns / 1e6);
                 LOG_I("perf gpu passes (ms and passes per frame):%s", gpu_top(g_gpu_passes, nf, 8).c_str());
+                if (g_draw_prof) LOG_I("perf gpu programs (ms and runs of draws per frame):%s", gpu_top(g_gpu_passes, nf, 25).c_str());
             }
             {
                 std::vector<std::pair<u32, std::pair<u32, const char*>>> v;

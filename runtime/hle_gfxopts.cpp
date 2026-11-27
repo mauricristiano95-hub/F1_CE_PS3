@@ -56,6 +56,15 @@ float ldf(u32 ea) { return std::bit_cast<float>(ld32(ea)); }
 void stf(u32 ea, float v) { st32(ea, std::bit_cast<u32>(v)); }
 }  // namespace
 
+// With motion blur off the game still draws its full-screen pass, as a plain copy (0x4475AC) of the resolved scene
+// (02190000 in the race) back into the antialiased target with the same 10-tap shader: no visible change, but ~0.8 ms
+// of GPU time a frame on a 5600G (2.6 ms on a Steam Deck) plus the target's MSAA resolves that feed it. The renderers
+// leave its draws out (state changes still applied) when this returns true for the program's hash (hash_fp of its
+// code, low 48 bits; the same game data everywhere).
+bool gfx_skip_program(u64 fh) {
+    return g_no_motion_blur && (fh & 0xFFFFFFFFFFFFull) == 0xAAA398817194ull;
+}
+
 // 0x447704: Post Effects -> Motion Blur.Enable
 bool motion_blur_get_hook(PPUContext& c) {
     if (!g_no_motion_blur) return false;
