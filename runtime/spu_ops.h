@@ -1235,11 +1235,14 @@ template <class S> bool spu_fast_cmdlist(S& s) {
         s.set_pref(0, 0x5C88);
         s.instructions += 152;
         const u64 prof_t0 = __builtin_expect(g_geom_op_prof, 0) ? __rdtsc() : 0;
+        char snap_name[16];
+        if (__builtin_expect(g_geom_snap != nullptr, 0)) { snprintf(snap_name, sizeof(snap_name), "h%05x_a", handler); g_geom_snap(s, snap_name); }
         if (__builtin_expect(g_geom_nj_handler != nullptr, 0) && g_geom_nj_handler(s, handler)) s.pc = 0x5C88;   // hle_geom.cpp
         else if (!geom_native_handler(s, handler)) s.pc = handler;
         else if (s.pc != 0x5C88) { geom_list_stat(GL_NATIVE_STOPPED); geom_stop_stat(handler, s.pc); }
         s.run_until(0x5C88);   // the SPU handler, or the rest of a native one that stopped early
         if (prof_t0) geom_op_prof(handler, __rdtsc() - prof_t0);
+        if (__builtin_expect(g_geom_snap != nullptr, 0)) { snap_name[7] = 'b'; g_geom_snap(s, snap_name); }
         if (s.halted || s.pc != 0x5C88) { geom_list_stat(GL_HALTED); return true; }   // the SPU code carries on
         op_lqx(s, 0x3898E883u);   // 05c8c lqx r3,r81,r99
         op_a(s, 0x1818E882u);   // 05c90 a r2,r81,r99

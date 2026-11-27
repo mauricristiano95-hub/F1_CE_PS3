@@ -199,7 +199,7 @@ at 0xAA, i.e. one job ran ~1 s and the in-order jobs after it waited); not seen 
 50 us), `F1CE_GEOM_HLE_TRACE=<n>` (the MFC commands of n jobs). The 3.4 s frame of another Time Trial run is the load
 point the baseline also has (no SPU work queued during it).
 
-Not done: step 2 (the semantic rewrite). With step 1 the job itself is what is left: ~10k SPU instructions per piece,
+(Superseded: see "Next steps" at the end.) Not done: step 2 (the semantic rewrite). With step 1 the job itself is what is left: ~10k SPU instructions per piece,
 ~16 us. A rewrite of the 15 opcodes (vertex decode, transform, cull, index packing, the output ring / done records) is
 the next big item; the operand layout above is its starting point, and the private SPU of hle_geom.cpp gives an easy
 check (same job on both paths, compare the MFC puts).
@@ -231,7 +231,7 @@ Tried: an eight-wide cull with AVX2 gathers from host-order x / y / z arrays: ex
 and transposes. Removed. `F1CE_SPU_NOCULL` (keep every triangle) adds ~10% vertices and ~17% draws but needs GPU-side
 back-face culling to look the same (single-sided transparent parts); left for step 3.
 
-Next: a native job for the common shape (ops 4 6 8 9 12 14 15 30 35 37 0, attribute mask 1) that reads the job record
+(Done since: see "Native job" below.) Next: a native job for the common shape (ops 4 6 8 9 12 14 15 30 35 37 0, attribute mask 1) that reads the job record
 directly and writes 1-5 itself, checked against the SPU job run dry (puts logged, atomics on a copy).
 
 ## Native job (`F1CE_GEOM_NJ=1`, `runtime/geom_native_job.cpp` + `hle_geom.cpp`, 2026-11-26)
@@ -296,3 +296,82 @@ not started: PPU writes would need page protection; worth it only where the rend
 
 Default since 2026-11-27 (after the user's PC session at 60 fps and the Steam Deck test at Original settings, 16 W max
 at the Silverstone start): `F1CE_GEOM_HLE` and `F1CE_GEOM_NJ` are on unless set to 0.
+
+## Skinned pieces (`F1CE_GEOM_SK`, on unless 0, `runtime/geom_skin_job.cpp`, 2026-11-27, branch `geom-skinned-shapes`)
+
+Next step 1 below. Census at the 60 fps + LOD0 race start (`F1CE_GEOM_SHAPES=1`): ~10% of the jobs (not 4%) are
+`4 6 8[.. 00140000] 9[3] 12 14 23 24 30 32 35 37 40 0` (drivers, pit crew; 9[7] with a third attribute is 0.6%), and
+their command lists took 26.7 us (op40 8.5, op32 4.7, op9 2.7), ~0.47 cores. Each of their handlers except the ones
+that reach main memory (4 12 30 37 0) and the cheap 6 8 14 35 is now native code that leaves the local store as the
+SPU handler does (outside the stack and the dead w words), and the list runs from C++ (`nj_list`).
+
+What the handlers do (`F1CE_GEOM_SNAP_OP=23` snapshots, now also per handler `snap_<job>_h<handler>_a/b.bin`; the op
+filter of the snapshots never worked before: it only counts after 20 s of geometry jobs, i.e. of race):
+- Vertex format (op8): two attributes, stride 18: float3 position at 0, half3 normal at 12 (output = input format).
+- op9 (0xB300, mask 3): per attribute (highest bit first: normals, positions) an array of nv4 16-byte entries at the
+  bump pointer; float = the 16 bytes at the vertex (0xBE00), half = 4 halves to floats ((h & 0x7FFF) << 13 + 0x38000000
+  unless 0, sign kept; 0xBF80). Bookkeeping: ctx[704] count, ctx[720 + 4n] arrays, ctx[784 + n] ids, ctx[800 + 4 (id -
+  1)] arrays (800 positions, 804 normals); every lane of the bump quad ctx[272..284] moves on by its own size.
+- op23 (0xB700, 10 operands): four buffers at the bump pointer (ctx[448..460]): the bone program (one code per four
+  vertices, end byte 8 appended), shared bone halfwords, per-vertex bone halfwords, weights (bytes / 255 as floats,
+  0xC180: csflt + fma). (A second weight set h8 and float weights are declined: not seen.)
+- op24 (0xB280): (h2 + 1) & ~1 bone matrices, 4x4 at the source, the first three columns as rows (0xC580); ctx[464].
+- op32 (0xB980 -> 0xEFA0 for mode 3): threaded code (jump tables 0x12A80.. per mode). Codes: 4 one shared bone, 6
+  shared bones with a weight quad each, 10 a bone per vertex (halfwords 1 0 3 2 for vertices 0-3) with weight quads, 2
+  a bone per vertex without weights, 0 the previous group's matrices, 8 end; bit 2 of a bone halfword = another bone
+  follows (for code 10: vertex 2's). Rows fm(w, M) then fma(w, M, acc). Transform (0xF598): positions fma(PY, B,
+  fma(C, PZ, fma(A, PX, D))); normals by the cofactor rows (cross products of the rows; which product is rounded and
+  which fused differs per element and between 0xF598 and the single-bone path 0xF900), the z term first after codes 4
+  and 0, then `n * frsqest(|n|^2)` (fi = identity). In place; the w words keep shuffle leftovers nobody reads.
+- op40 (0x6A30): the format kernel pointer ctx[896 + 4k] is 0, so per attribute 0x66B8 -> 0x61C8 -> encoder (0xE200
+  float: bytes copied; 0xE700 half: fma(x, 1, 0), truncated, exponent < 112 -> 0, >= 144 -> 0x7BFF). nv rounded up to
+  4 vertices, at ctx[320] aligned to 16 (0x4C18; a full 0x7800-byte output buffer would be put out first: declined);
+  before it 0x8970 makes a table of nv8 halfwords v << 4 (ctx[928..936]); ctx[864] = vertex offset in the output,
+  ctx[1200 + 4n] = ctx + 864, n = ctx[1184]++. op0 then puts indices + vertices in one put and sets RSX 0x1680 /
+  0x1688 (position / normal array offsets, stride 18) before the draw.
+
+Checks: `F1CE_GEOM_SK_CHECK=1` runs every native handler and then the SPU handler from the same state and compares the
+local store below the stack (w words of the vertex arrays skipped): 650k handler runs, 0 differences.
+`F1CE_GEOM_NJ=2` now also runs skinned jobs twice (native then original) and compares their puts (ring data by
+content, RSX slots with the vertex / index array offsets zeroed): 205k jobs, 0 differences.
+
+Per handler (stress, `F1CE_GEOM_OP_PROF=1`): op9 2.6 -> 1.0 us, op23 0.8 -> 0.26, op24 0.33 -> 0.11, op32 4.7 -> 2.3,
+op40 8.5 -> 2.0; time in jobs (setup + run) 2.26 -> 1.89 cores at the same frame rate.
+
+Speed (carbench, three alternating pairs, `F1CE_GEOM_SK=0` against 1, `F1CE_THREAD_CPU=1`):
+- 60 fps + LOD0, 8 CPUs: 45.8 / 45.5 / 45.9 -> 46.4 / 46.9 / 46.9 fps (+2%); SPU workers 3.98-4.07 -> 3.79-3.85 cores.
+- 60 fps, normal detail, 4 CPUs: 36.1 / 35.8 / 37.5 -> 36.1 / 36.2 / 36.6 fps (no change; not limited by these jobs).
+Scenario: 150 s race at 30 fps (Vulkan) clean, drivers render; Linux cross build compiles.
+Left for the skinned shape: op35 (cull, SPU handler with the native loops, ~2 us), op40 / op32 not vectorised
+(2.0 / 2.3 us), the 9[7] variant (third attribute, 0.6% of jobs).
+
+## Next steps (as of 2026-11-27, ranked by expected payoff)
+
+State: geometry HLE + native job on by default, FIFO parse thread on. PC (Ryzen 5600G): 60 fps held at race starts;
+the stress case is bound by the frame's dependency chain, no thread saturated. Steam Deck: Original settings at 30 fps,
+16 W max at the Silverstone start; the remaining dips (race start, pit stop) are GPU-bound there.
+
+1. (Done for 9[3], see "Skinned pieces" above.) The declined job shapes (`... 9[3] / 9[7] 12 14 23 24 30 32 35 37 40 0`, 3.5-4% of jobs, ~30 us each, ~0.5 cores
+   in the stress case; heavier during the Deck's pit stop: 12-16k SPU instructions per job). Animated / skinned pieces:
+   besides indices they write processed vertices to the ring and repoint vertex arrays (RSX 0x1680 / 0x1688). Needs
+   the semantics of op23 (10 operands), op24, op32 (~5.4 us) and op40 (~8.9 us). Start with `F1CE_GEOM_SNAP_OP=23`
+   snapshots and the trace; check with the run-twice harness (`F1CE_GEOM_NJ=2`, extend the comparison to the vertex
+   data in the ring).
+2. The rest of a covered job (11.8 us): op12 (builds the a b c a list) and op37 (packs the kept triangles) could be
+   native now that the kept list is known (~1 us with their command overhead); the HLE setup (~1.9 us: descriptor,
+   gather list, buffer bookkeeping) and the job's entry / main (~1 us) are the next fat. The native cull (2.4 us) resisted
+   two rewrites (AVX2 gathers, branch-free compaction: both slower on Zen 3). op0 (2.4 us, completion protocol) stays
+   SPU code unless reverse engineered with care (in-order windows, kick).
+3. The frame's dependency chain on the PC: profile what the main PPU thread waits for per frame (job waits, flips) now
+   that neither the SPU side nor the renderer is saturated.
+4. Deck GPU: the 1280x720 4x MSAA scene pass took ~33 ms during the pit stop (`gpu slow submission` lines). Look at the
+   pass breaks / resolves there, or recommend MSAA 2x on the Deck.
+5. Step 3 of the handoff (culling on the GPU): keep every triangle and let the GPU cull back faces; removes the cull and
+   transform (~3 us a job) but needs the per-piece facing sign on the GPU side and a visual check (single-sided
+   transparent parts). `F1CE_SPU_NOCULL=1` shows the cost: ~10% more vertices, ~17% more draws.
+6. Step 4 write tracking (instead of `hash_range` / `hash_fp`): parked; it only helps where the renderer thread is the
+   limit, and PPU writes would need page protection.
+
+Open issues seen during this work: Monaco Time Trial ~1 s frames in 1 of 4 runs (not reproduced since; watchdog prints
+`geom hle jobs:`); the MP3 decode read fault at 0x40000000 once (workload 4, the old race on another path; fallback =
+clamp the sample count in 0xB3A7C); the intermittent OpenGL boot fault "unmapped IO offset 1f800000".

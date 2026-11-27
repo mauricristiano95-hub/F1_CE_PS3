@@ -38,6 +38,9 @@
 #include "spu.h"
 
 bool geom_nj_kept(const u8* set1, u32 set1_size, std::vector<u16>& kept, u32& pad, u16 pad_abc[3]);   // geom_native_job.cpp
+bool geom_sk_shape(const u8* set1, u32 set1_size);   // geom_skin_job.cpp: skinned pieces
+bool geom_sk_handler(SPUThread& s, u32 handler);
+void geom_sk_report();
 extern bool g_geom_op_prof;   // below (F1CE_GEOM_OP_PROF)
 void geom_op_prof(u32 handler, u64 tsc);
 
@@ -81,6 +84,7 @@ std::atomic<u64> g_nj_op9{0};
 thread_local const std::vector<u16>* t_nj_kept = nullptr;   // the running job's kept triangles (native job)
 thread_local u32 t_nj_pad = ~0u;          // and the triangle the compaction leaves after them (~0: none)
 thread_local u16 t_nj_pad_abc[3];
+thread_local bool t_sk = false;   // the running job is a skinned piece with native handlers (geom_skin_job.cpp)
 
 bool nj_handler(SPUThread& s, u32 handler);
 // debug (F1CE_GEOM_NJ_REGDIFF): registers at each handler entry, recorded in the original run and compared in the native one
@@ -114,7 +118,7 @@ void reg_capture(const SPUThread& s, u32 handler) {
 // list. Handlers keep r80-r127 (the ABI), so returning to the caller needs only r1 and the pc.
 thread_local u64 t_job_t0 = 0, t_list_end = 0;   // F1CE_GEOM_OP_PROF: job start, end of the native list
 bool nj_list(SPUThread& s) {
-    if (!t_nj_kept) return false;
+    if (!t_nj_kept && !t_sk) return false;
     if (g_geom_op_prof && t_job_t0) geom_op_prof(27, __rdtsc() - t_job_t0);
     const u32 ctx = s.pref(3) & 0x3FFF0, ret = s.pref(0) & 0x3FFFC, sp = s.pref(1);
     s.ls32(ctx + 352, s.ls32(ctx + 560) + 2);
@@ -175,6 +179,7 @@ bool nj_handler(SPUThread& s, u32 handler) {
     }
     const std::vector<u16>* kept = t_nj_kept;
     if (t_cap) reg_capture(s, handler);
+    if (t_sk) return geom_sk_handler(s, handler);
     if (!kept) return false;
     static const bool skip9 = !(getenv("F1CE_GEOM_NJ9") && atoi(getenv("F1CE_GEOM_NJ9")) == 0);
     if (handler == 0xB300 && skip9) {   // op9: the positions it decodes only feed op35's transform
@@ -509,7 +514,7 @@ struct Pool {
 
     // F1CE_GEOM_NJ=2: the job from its current state twice (see run_job), the second time for real
     struct Put { u32 cmd, ea, size; std::vector<u8> data; };
-    void run_twice(std::vector<u16>& kept, u32 idx, u32 desc) {
+    void run_twice(std::vector<u16>& kept, u32 idx, u32 desc, bool sk = false) {
         // what a run changes besides the LS and registers: this manager's buffer bookkeeping
         struct Book { Set sets[16]; Elem elems[16][32]; u8 map[16][32]; u32 cached[16][32]; u16 inuse[64]; u32 ninuse, words[4], nwords; };
         auto book = std::make_unique<Book>();
@@ -537,11 +542,13 @@ struct Pool {
             const bool native = regdiff ? r == 1 : r == 0;
             if (regdiff && r == 0) { cap.clear(); t_cap = &cap; }
             if (regdiff && r == 1) { t_cmp = &cap; t_cmp_at = 0; }
-            t_nj_kept = native ? &kept : nullptr;
-            if (native) nj_stream();
+            t_nj_kept = native && !sk ? &kept : nullptr;
+            t_sk = native && sk;
+            if (native && !sk) nj_stream();
             t.halted = false;
             t.run_until(~0u);
             t_nj_kept = nullptr;
+            t_sk = false;
             t_cap = nullptr;
             t_cmp = nullptr;
             t.dma_log = nullptr;
@@ -566,7 +573,11 @@ struct Pool {
                 if ((p.ea >> 24) == 0x35) p.ea = 0;
                 else if ((p.ea >> 24) == 0x31) {   // the draws' chunks follow the ring address: their total count
                     std::vector<u8> n2(p.data.begin(), p.data.begin() + std::min<size_t>(20, p.data.size()));
-                    if (n2.size() >= 8) memset(n2.data() + 4, 0, 4);
+                    for (size_t i = 0; i + 8 <= n2.size(); i += 4) {   // the ring offsets (index array, skinned vertices)
+                        const u32 h = (u32)n2[i] << 24 | n2[i + 1] << 16 | n2[i + 2] << 8 | n2[i + 3], m = h & 0xFFFC;
+                        if (m == 0x181C || (m >= 0x1680 && m < 0x16C0)) memset(n2.data() + i + 4, 0, 4);
+                        if ((h >> 18 & 0x7FF) && !(h & 0xE0000003)) i += 4 * (h >> 18 & 0x7FF);   // (past the data words)
+                    }
                     u32 total = 0;
                     for (size_t i = 0; i + 8 <= p.data.size(); i += 4) {
                         const u32 h = (u32)p.data[i] << 24 | p.data[i + 1] << 16 | p.data[i + 2] << 8 | p.data[i + 3];
@@ -675,6 +686,7 @@ struct Pool {
             }
             const int n = has && seen++ % every == 0 ? snapped++ : snaps;
             if (n < snaps) {
+                LOG_I("geom snap %d: job %u desc %08x", n, idx, e1);
                 t_snap_job = n;
                 g_geom_snap = snap_write;
                 snap_write(t, "start");
@@ -734,13 +746,16 @@ struct Pool {
             nj_on = geom_nj_kept(t.ls + (start(1, map[1][0]) << 10), sets[1].a1 << 10, nj_kept, t_nj_pad, t_nj_pad_abc);
             (nj_on ? g_nj_used : g_nj_declined).fetch_add(1, std::memory_order_relaxed);
         }
+        // F1CE_GEOM_SK (default 1, 0: off): skinned pieces with native handlers (geom_skin_job.cpp)
+        static const bool sk_on = !(getenv("F1CE_GEOM_SK") && atoi(getenv("F1CE_GEOM_SK")) == 0);
+        t_sk = sk_on && nj_mode && !tracing && !nj && !nj_on && geom_sk_shape(t.ls + (start(1, map[1][0]) << 10), sets[1].a1 << 10);
         static std::atomic<u32> nj_checks{0};
-        const bool nj_twice = nj_on && nj_mode == 2 && (nj_checks++ & 15) == 0;
+        const bool nj_twice = (nj_on || t_sk) && nj_mode == 2 && (nj_checks++ & 15) == 0;
         t.halted = false;   // (not run(): its getenv and flush check on every job showed in profiles)
         const u64 prof_t1 = prof_t0 ? __rdtsc() : 0;
         if (prof_t0) geom_op_prof(5, prof_t1 - prof_t0);   // slot 5: the setup before the job, slot 7: the job's run
         if (nj_twice) {
-            run_twice(nj_kept, idx, e1);
+            run_twice(nj_kept, idx, e1, t_sk);
         } else {
             t_nj_kept = nj_on ? &nj_kept : nullptr;
             if (nj_on) nj_stream();
@@ -749,6 +764,7 @@ struct Pool {
             if (prof_t1 && t_list_end) geom_op_prof(28, __rdtsc() - t_list_end);
             t_nj_kept = nullptr;
         }
+        t_sk = false;
         if (prof_t0) geom_op_prof(7, __rdtsc() - prof_t1);
         if (tracing) {
             t.on_dma = nullptr;
@@ -923,6 +939,7 @@ void geom_hle_report() {
         LOG_I("geom nj: %llu jobs native (op35 %llu), %llu declined; run twice: %llu same, %llu differ",
               (unsigned long long)g_nj_used.load(), (unsigned long long)g_nj_op35.load(), (unsigned long long)g_nj_declined.load(),
               (unsigned long long)g_nj_twice_same.load(), (unsigned long long)g_nj_twice_differ.load());
+    geom_sk_report();
     if (g_nj_same.load() + g_nj_differ.load() + g_nj_declined.load())
         LOG_I("geom nj check: %llu same, %llu differ, %llu declined", (unsigned long long)g_nj_same.load(),
               (unsigned long long)g_nj_differ.load(), (unsigned long long)g_nj_declined.load());
