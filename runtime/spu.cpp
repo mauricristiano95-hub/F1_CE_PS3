@@ -392,6 +392,7 @@ void SPUThread::run() {
 
 // debug (hle_geom.cpp F1CE_GEOM_PC_HIST): per-word instruction counts while set, in the per-instruction mode
 thread_local std::atomic<u32>* t_spu_pc_hist = nullptr;
+thread_local u32* t_spu_pc_word = nullptr;   // (with it: the instruction word last run at each address)
 void SPUThread::run_until(u32 stop) {
     static const bool per_instruction = getenv("F1CE_SPU_NOBLOCK") || !g_pc_log.empty();
     while (!halted && pc != stop) {
@@ -405,10 +406,13 @@ void SPUThread::run_until(u32 stop) {
         }
         if (per_instruction) {
             if (__builtin_expect(!g_pc_log.empty(), 0) && g_pc_log[(pc & 0x3FFFC) >> 2]) pc_log(*this);
-            if (__builtin_expect(t_spu_pc_hist != nullptr, 0)) t_spu_pc_hist[(pc & 0x3FFFC) >> 2].fetch_add(1, std::memory_order_relaxed);
             u32 w;
             memcpy(&w, ls + (pc & 0x3FFFC), 4);
             w = __builtin_bswap32(w);
+            if (__builtin_expect(t_spu_pc_hist != nullptr, 0)) {
+                t_spu_pc_hist[(pc & 0x3FFFC) >> 2].fetch_add(1, std::memory_order_relaxed);
+                if (t_spu_pc_word) t_spu_pc_word[(pc & 0x3FFFC) >> 2] = w;
+            }
             u32 idx = w >> 21;
             g_table[idx](*this, w);
             if (!g_control[idx]) pc += 4;
