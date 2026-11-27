@@ -13,6 +13,7 @@
 //                    2 * ((nv + 31) & ~15) bytes, ctx[928] = table, ctx[932] = nv, ctx[936] = -1; after it
 //                    ctx[864] = vertex data offset in the output, ctx[1200 + 4 n] = ctx + 864, n = ctx[1184]++.
 //                    Arrays (op9 / op32): positions at ctx[800], normals at ctx[804] (16 bytes per vertex).
+#include <algorithm>
 #include <atomic>
 #include <cfloat>
 #include <cstring>
@@ -355,8 +356,64 @@ bool op24(SPUThread& s) {
     return true;
 }
 
+// op12 (0x7C50), u16 triangles (low nibble of the command 0): ntri = h2 at set 1 + h1 to (a b c a) entries of 8 bytes
+// (0xBD80, eight a step: round_up8(ntri) entries, the last ones from the bytes after the triangles) in
+// round_up8(ntri) * 8 bytes at the bump pointer (0x41C0: word 0 of ctx[272] only); ctx[400] = list, ctx[384] = 3 ntri,
+// ctx[388] = 3 h3. Covered and skinned jobs.
+}  // namespace
+// hle_geom.cpp, covered jobs: the native op35 writes the kept entries; of the others only those op37 packs as padding
+// after them are read (entries kn .. round_up8(kn) + 8): the list is filled there only
+thread_local bool t_geom_list_dead = false;
+thread_local u32 t_geom_list_kept = 0;
+namespace {
+bool op12(SPUThread& s) {
+    const u32 ctx = s.pref(3) & 0x3FFF0;
+    const u32 h0 = arg(s, 0), h2 = arg(s, 2), h3 = arg(s, 3);
+    const u32 src = (s.ls32(ctx + 256) + arg(s, 1)) & 0x3FFFF, list = s.ls32(ctx + 272), nt = (h2 + 7) & ~7u;
+    if ((h0 & 15) || (src & 15) || (list & 15) || src + 6 * nt > 0x40000 || list + 8 * nt > 0x40000) return sk_decline(25);
+    s.ls32(ctx + 272, list + 8 * nt);
+    s.ls32(ctx + 400, list);
+    const u8* q = s.ls + src;
+    u8* o = s.ls + list;
+    u32 t0 = 0, t1 = nt;
+    if (t_geom_list_dead && !g_check) { t0 = std::min(t_geom_list_kept, nt); t1 = std::min(((t_geom_list_kept + 7) & ~7u) + 8, nt); }
+    q += 6 * t0; o += 8 * t0;
+    for (u32 t = t0; t < t1; t++, q += 6, o += 8) { memcpy(o, q, 6); memcpy(o + 6, q, 2); }
+    s.ls32(ctx + 384, 3 * h2);
+    s.ls32(ctx + 388, 3 * h3);
+    return true;
+}
+
+// op4 (0x7790): the job's parameters, 0x90 bytes from set 1 + h1 to the bump pointer (0x7580 -> 0x41C0 / 0xBA80),
+// ctx[576] = them; when parameter word 0x28 is set, a 16-byte GET from parameter word 16 + 16 * SPU number to
+// ctx + 240, tag ctx[264], between an interrupt disable and an enable.
+bool op4(SPUThread& s) {
+    const u32 ctx = s.pref(3) & 0x3FFF0;
+    const u32 src = (s.ls32(ctx + 256) + arg(s, 1)) & 0x3FFFF, dst = s.ls32(ctx + 272);
+    if ((dst & 15) || (src & 15) || dst + 0xD0 > 0x40000 || src + 0xD0 > 0x40000) return sk_decline(26);
+    s.ls32(ctx + 272, dst + 0x90);
+    // 0xBA80 with both addresses aligned: 64-byte blocks, then one more store at + 0xC0 of the quad that was at
+    // + 0x80 before the copy (its tail merge picks the old bytes there entirely)
+    u8 old80[16];
+    memcpy(old80, s.ls + dst + 0x80, 16);
+    memmove(s.ls + dst, s.ls + src, 0x90);
+    memcpy(s.ls + dst + 0xC0, old80, 16);
+    s.ls32(ctx + 576, dst);
+    if (s.ls32(dst + 0x28)) {
+        s.mfc_lsa = ctx + 240;
+        s.mfc_eal = s.ls32(dst + 16) + (s.ls32(s.ls32(0x12C00)) << 4);
+        s.mfc_size = 16;
+        s.mfc_tag = s.ls32(ctx + 264);
+        s.dma(0x40);
+        s.interrupts = true;
+    }
+    return true;
+}
+
 bool native(SPUThread& s, u32 handler) {
     switch (handler) {
+        case 0x07790: return op4(s);
+        case 0x07C50: return op12(s);
         case 0x0B300: return op9(s);
         case 0x0B700: return op23(s);
         case 0x0B280: return op24(s);

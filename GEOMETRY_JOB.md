@@ -345,6 +345,27 @@ Scenario: 150 s race at 30 fps (Vulkan) clean, drivers render; Linux cross build
 Left for the skinned shape: op35 (cull, SPU handler with the native loops, ~2 us), op40 / op32 not vectorised
 (2.0 / 2.3 us), the 9[7] variant (third attribute, 0.6% of jobs).
 
+## Step 2: the rest of a covered job (2026-11-27, same branch)
+
+Per covered job at the stress start (`F1CE_GEOM_OP_PROF=1`): setup ~4 us (native cull 2.5, transform 0.55, HLE ~0.9),
+run ~5.7 us (op0 2.1, job entry 0.9, op37 0.46, op12 0.44, op35 0.31, op4 0.30, after the list 0.24, op30 0.17).
+- op12 (0x7C50) and op4 (0x7790) native for covered and skinned jobs (geom_skin_job.cpp, `F1CE_GEOM_NJ_OPS=0` turns
+  the covered-job use off). op12: round_up8(ntri) entries (0xBD80 converts eight a step); in covered jobs only the
+  entries op37 can pack as padding after the kept ones are written (kn .. round_up8(kn) + 8), the rest is dead (the
+  native op35 writes the kept entries): 0.44 -> 0.10 us. op4: 0x90 parameter bytes, and 0xBA80 (both addresses
+  aligned) ends with a store at + 0xC0 of the quad that was at + 0x80 before the copy; an optional 16-byte GET:
+  0.30 -> ~0.1 us. Checked: SK_CHECK 1.49M handler runs, NJ=2 170k jobs, 0 differences.
+- The kept vector of run_job is reused (a vector per job showed as new / delete, 1.6% of the workers).
+- Tried and reverted: (1) a third cull rewrite, per-vertex values (cvt, edge flags: exact, since min / max, the
+  saturating add and truncation are monotonic) and a branch-free scalar loop per triangle: exact (2.5M jobs) but
+  2x slower; pieces have ~1000 triangles and the four-wide loop already does about four per 10 cycles. (2) Not copying
+  the positions / triangles of set 1 (the elements holding them, slack bytes copied) and reading them from main memory
+  in the native job: exact, 64% of the gathered bytes left in main memory, but no change in setup time (the cull
+  takes the cache misses the copy took). Lesson: a stray non-static getenv in a per-job path cost 4 us per job.
+- Left: op0 (2.1 us, ~1100 instructions + ring / flush / DMA helpers: the completion protocol), op37 (its first
+  allocation initialises the output buffer through the job manager's services +0x30 / +0x34), the job's entry (0.9).
+  The SpinLock in the profile (2.6%) is contention on the queue / in-order line atomics.
+
 ## Next steps (as of 2026-11-27, ranked by expected payoff)
 
 State: geometry HLE + native job on by default, FIFO parse thread on. PC (Ryzen 5600G): 60 fps held at race starts;
@@ -357,7 +378,7 @@ the stress case is bound by the frame's dependency chain, no thread saturated. S
    the semantics of op23 (10 operands), op24, op32 (~5.4 us) and op40 (~8.9 us). Start with `F1CE_GEOM_SNAP_OP=23`
    snapshots and the trace; check with the run-twice harness (`F1CE_GEOM_NJ=2`, extend the comparison to the vertex
    data in the ring).
-2. The rest of a covered job (11.8 us): op12 (builds the a b c a list) and op37 (packs the kept triangles) could be
+2. (Partly done, see "Step 2" above.) The rest of a covered job (11.8 us): op12 (builds the a b c a list) and op37 (packs the kept triangles) could be
    native now that the kept list is known (~1 us with their command overhead); the HLE setup (~1.9 us: descriptor,
    gather list, buffer bookkeeping) and the job's entry / main (~1 us) are the next fat. The native cull (2.4 us) resisted
    two rewrites (AVX2 gathers, branch-free compaction: both slower on Zen 3). op0 (2.4 us, completion protocol) stays

@@ -41,6 +41,8 @@ bool geom_nj_kept(const u8* set1, u32 set1_size, std::vector<u16>& kept, u32& pa
 bool geom_sk_shape(const u8* set1, u32 set1_size);   // geom_skin_job.cpp: skinned pieces
 bool geom_sk_handler(SPUThread& s, u32 handler);
 void geom_sk_report();
+extern thread_local bool t_geom_list_dead;
+extern thread_local u32 t_geom_list_kept;
 extern bool g_geom_op_prof;   // below (F1CE_GEOM_OP_PROF)
 void geom_op_prof(u32 handler, u64 tsc);
 
@@ -181,6 +183,16 @@ bool nj_handler(SPUThread& s, u32 handler) {
     if (t_cap) reg_capture(s, handler);
     if (t_sk) return geom_sk_handler(s, handler);
     if (!kept) return false;
+    // op4 / op12 native as for the skinned pieces (geom_skin_job.cpp; F1CE_GEOM_NJ_OPS=0: the SPU handlers)
+    static const bool nj_ops = !(getenv("F1CE_GEOM_NJ_OPS") && atoi(getenv("F1CE_GEOM_NJ_OPS")) == 0);
+    if (handler == 0x07790 && nj_ops) return geom_sk_handler(s, handler);
+    if (handler == 0x07C50 && nj_ops) {
+        t_geom_list_dead = true;
+        t_geom_list_kept = (u32)kept->size() / 3;
+        const bool r = geom_sk_handler(s, handler);
+        t_geom_list_dead = false;
+        return r;
+    }
     static const bool skip9 = !(getenv("F1CE_GEOM_NJ9") && atoi(getenv("F1CE_GEOM_NJ9")) == 0);
     if (handler == 0xB300 && skip9) {   // op9: the positions it decodes only feed op35's transform
         g_nj_op9.fetch_add(1, std::memory_order_relaxed);
@@ -230,6 +242,7 @@ struct Pool {
         ninuse = 0;
     }
     u32 cached_ea[16][32] = {};   // mode 0x2000 elements: the EA whose data the element still holds (0: none)
+    std::vector<u16> nj_kept_store;
 
     void get(u32 lsa, u32 ea, u32 size, u32 cmd = 0x40) {
         t.mfc_lsa = lsa; t.mfc_eal = ea; t.mfc_size = size; t.mfc_tag = 1;
@@ -720,7 +733,8 @@ struct Pool {
             };
         // F1CE_GEOM_NJ_CHECK=1: the native job's kept triangles (geom_native_job.cpp) against the job's index put
         static const bool nj_check = getenv("F1CE_GEOM_NJ_CHECK") != nullptr;
-        std::vector<u16> nj_kept;
+        std::vector<u16>& nj_kept = nj_kept_store;   // (reused: a vector per job showed as new / delete in profiles)
+        nj_kept.clear();
         std::vector<u8> nj_put;
         bool nj = false, nj_got = false;
         if (nj_check && !tracing) {
