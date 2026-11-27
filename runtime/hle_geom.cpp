@@ -38,6 +38,8 @@
 #include "spu.h"
 
 bool geom_nj_kept(const u8* set1, u32 set1_size, std::vector<u16>& kept, u32& pad, u16 pad_abc[3]);   // geom_native_job.cpp
+bool geom_op0_native(SPUThread& s, int max_spins);   // geom_op0.cpp
+bool geom_op0_declines(SPUThread& s);
 bool geom_sk_shape(const u8* set1, u32 set1_size);   // geom_skin_job.cpp: skinned pieces
 bool geom_sk_handler(SPUThread& s, u32 handler);
 void geom_sk_report();
@@ -174,6 +176,121 @@ bool nj_list(SPUThread& s) {
 // triangles of 8 bytes, a b c a), compacted in place to the kept ones; then ctx[384] = kept * 3, ctx[388] = 0,
 // ctx[1152] = 1; the transformed vertices go to scratch above the bump pointer ctx[272], which ends where it started.
 // Here the kept list computed from the job's input (geom_native_job.cpp). Declined unless the list is the one computed.
+// F1CE_GEOM_OP0_CHECK=1: op0 native and SPU, both dry (puts logged, line stores on a private copy) from the same state,
+// the shared lines (ring, in-order line, done records) read from one snapshot; their MFC commands (with the data put
+// or stored) and the local stores compared; then the SPU handler for real. Runs that wait for other SPUs (a locked
+// line in the snapshot) are left out.
+std::atomic<u64> g_op0_native{0}, g_op0_declined{0}, g_op0_same{0}, g_op0_differ{0}, g_op0_skipped{0};
+struct MfcRec { u32 cmd, lsa, ea, size, tag; std::vector<u8> data; bool operator==(const MfcRec& o) const {
+    return cmd == o.cmd && lsa == o.lsa && ea == o.ea && size == o.size && tag == o.tag && data == o.data; } };
+bool op0_check(SPUThread& s) {
+    if (geom_op0_declines(s)) return false;
+    struct Saved { v128 gpr[128]; u32 lsa, eah, eal, size, tag, tag_mask, atomic_stat, res_addr, res_gen, polls, dry_ea; bool intr, res; u8 res_data[128], dry[128]; };
+    thread_local std::vector<u8> ls0, ls1, ls2;
+    auto sv = std::make_unique<Saved>();
+    memcpy(sv->gpr, s.gpr, sizeof(sv->gpr));
+    sv->lsa = s.mfc_lsa; sv->eah = s.mfc_eah; sv->eal = s.mfc_eal; sv->size = s.mfc_size; sv->tag = s.mfc_tag; sv->tag_mask = s.tag_mask;
+    sv->atomic_stat = s.atomic_stat; sv->res_addr = s.res_addr; sv->res_gen = s.res_gen; sv->polls = s.llar_polls; sv->dry_ea = s.dry_line_ea;
+    sv->intr = s.interrupts; sv->res = s.has_reservation; memcpy(sv->res_data, s.res_data, 128); memcpy(sv->dry, s.dry_line, 128);
+    ls0.assign(s.ls, s.ls + 0x40000);
+    auto restore = [&] {
+        s.write_ls(0, ls0.data(), 0x40000);
+        memcpy(s.gpr, sv->gpr, sizeof(sv->gpr));
+        s.mfc_lsa = sv->lsa; s.mfc_eah = sv->eah; s.mfc_eal = sv->eal; s.mfc_size = sv->size; s.mfc_tag = sv->tag; s.tag_mask = sv->tag_mask;
+        s.atomic_stat = sv->atomic_stat; s.res_addr = sv->res_addr; s.res_gen = sv->res_gen; s.llar_polls = sv->polls; s.dry_line_ea = sv->dry_ea;
+        s.interrupts = sv->intr; s.has_reservation = sv->res; memcpy(s.res_data, sv->res_data, 128); memcpy(s.dry_line, sv->dry, 128);
+        s.halted = false;
+    };
+    const u32 ctx = s.pref(3) & 0x3FFF0, p = s.ls32(ctx + 576) & 0x3FFFF, sp = s.pref(1);
+    auto ov = std::make_unique<SPUThread::DryOverlay>();
+    const u32 lines[3] = {s.ls32(p + 16) & ~127u, s.ls32(p + 24) & ~127u, (s.ls32(p + 24) + 128) & ~127u};
+    for (u32 l : lines)
+        if (l) { ov->ea[ov->n] = l; memcpy(ov->data[ov->n], gmem(l), 128); ov->n++; }
+    std::vector<MfcRec> rec[2];
+    std::vector<SpuDmaRec> log;
+    bool intr[2] = {}, oks[2] = {};
+    u32 llars = 0;
+    for (int r = 0; r < 2; r++) {
+        std::vector<MfcRec>* out = &rec[r];
+        llars = 0;
+        s.on_dma = [out, &llars](SPUThread& t, u32 cmd, u32 lsa, u32 ea, u32 size) {
+            MfcRec m{cmd & 0xFF, lsa, ea, size, t.mfc_tag, {}};
+            if ((cmd & 0xF4) == 0x20) m.data.assign(t.ls + (lsa & 0x3FFFF), t.ls + std::min((lsa & 0x3FFFF) + std::min(size, 0x4000u), 0x40000u));
+            if ((cmd & 0xF0) == 0xB0) m.data.assign(t.ls + (lsa & 0x3FF80), t.ls + (lsa & 0x3FF80) + 128);
+            if ((cmd & 0xFF) == 0xD0 && ++llars > 6) t.halted = true;   // waiting for another SPU: not compared
+            out->push_back(std::move(m));
+        };
+        log.clear();
+        s.dma_log = &log;
+        s.dry_overlay = ov.get();
+        s.dry_line_ea = ~0u;
+        bool ok;
+        if (r == 0) {
+            ok = geom_op0_native(s, 3);
+        } else {
+            s.pc = 0x08C80;
+            s.run_until(0x5C88);
+            ok = !s.halted && s.pc == 0x5C88;
+        }
+        s.on_dma = nullptr;
+        s.dma_log = nullptr;
+        s.dry_overlay = nullptr;
+        intr[r] = s.interrupts;
+        (r ? ls2 : ls1).assign(s.ls, s.ls + 0x40000);
+        restore();
+        oks[r] = ok;
+    }
+    if (!oks[0] && !oks[1]) {   // both wait for another SPU: their commands up to where the shorter one stopped
+        const size_t n = std::min(rec[0].size(), rec[1].size());
+        bool same = true;
+        for (size_t i = 0; i + 1 < n; i++) same = same && rec[0][i] == rec[1][i];
+        (same ? g_op0_skipped : g_op0_differ).fetch_add(1, std::memory_order_relaxed);
+        if (!same) { static std::atomic<int> lg{0}; if (lg++ < 10) LOG_W("geom op0 check: the waits differ (%zu / %zu commands)", rec[0].size(), rec[1].size()); }
+        return false;
+    }
+    if (oks[0] != oks[1]) {
+        g_op0_differ.fetch_add(1, std::memory_order_relaxed);
+        static std::atomic<int> lg{0};
+        if (lg++ < 10) LOG_W("geom op0 check: only the %s waits (%zu / %zu commands)", oks[0] ? "SPU code" : "native code", rec[0].size(), rec[1].size());
+        return false;
+    }
+    std::string d;
+    char b[160];
+    size_t i = 0;
+    for (; i < rec[0].size() && i < rec[1].size() && rec[0][i] == rec[1][i]; i++) {}
+    if (i < rec[0].size() || i < rec[1].size()) {
+        snprintf(b, sizeof(b), " mfc %zu/%zu, first difference at %zu:", rec[0].size(), rec[1].size(), i);
+        d += b;
+        for (int r = 0; r < 2; r++)
+            if (i < rec[r].size()) {
+                const MfcRec& m = rec[r][i];
+                snprintf(b, sizeof(b), " %s cmd %02x lsa %05x ea %08x size %x tag %u", r ? "| SPU" : "native", m.cmd, m.lsa, m.ea, m.size, m.tag);
+                d += b;
+                for (size_t k = 0; k < m.data.size() && k < 32; k += 4) {
+                    snprintf(b, sizeof(b), " %02x%02x%02x%02x", m.data[k], m.data[k + 1], m.data[k + 2], m.data[k + 3]);
+                    d += b;
+                }
+            }
+    }
+    const u32 end = (sp - 0x2000) & 0x3FFF0;
+    u32 nls = 0;
+    for (u32 a = 0; a < end; a += 4)
+        if (memcmp(ls1.data() + a, ls2.data() + a, 4)) {
+            if (nls++ < 10) {
+                u32 x, y; memcpy(&x, ls1.data() + a, 4); memcpy(&y, ls2.data() + a, 4);
+                snprintf(b, sizeof(b), " ls %05x %08x/%08x", a, __builtin_bswap32(x), __builtin_bswap32(y));
+                d += b;
+            }
+        }
+    if (intr[0] != intr[1]) d += " interrupts";
+    (d.empty() ? g_op0_same : g_op0_differ).fetch_add(1, std::memory_order_relaxed);
+    if (!d.empty()) {
+        static std::atomic<int> logged{0};
+        if (logged++ < 30) LOG_W("geom op0 check (native/SPU):%s", d.c_str());
+    }
+    return false;
+}
+
 bool nj_handler(SPUThread& s, u32 handler) {
     static std::atomic<int> regs_logged{0};   // debug (F1CE_GEOM_NJ_REGS): the handlers' inputs, first 40 calls
     static const bool log_regs = getenv("F1CE_GEOM_NJ_REGS") != nullptr;
@@ -187,6 +304,14 @@ bool nj_handler(SPUThread& s, u32 handler) {
     }
     const std::vector<u16>* kept = t_nj_kept;
     if (t_cap) reg_capture(s, handler);
+    if (handler == 0x08C80) {   // op0 (geom_op0.cpp; F1CE_GEOM_OP0=0: the SPU handler)
+        static const bool op0_on = !(getenv("F1CE_GEOM_OP0") && atoi(getenv("F1CE_GEOM_OP0")) == 0);
+        static const bool op0_chk = getenv("F1CE_GEOM_OP0_CHECK") != nullptr;
+        if (op0_chk) return op0_check(s);
+        if (op0_on && geom_op0_native(s, 1 << 30)) { g_op0_native.fetch_add(1, std::memory_order_relaxed); return true; }
+        if (op0_on) g_op0_declined.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
     if (t_sk) return geom_sk_handler(s, handler);
     if (!kept) return false;
     // op4 / op12 native as for the skinned pieces (geom_skin_job.cpp; F1CE_GEOM_NJ_OPS=0: the SPU handlers)
@@ -963,6 +1088,10 @@ void geom_hle_report() {
               (unsigned long long)g_nj_used.load(), (unsigned long long)g_nj_op35.load(), (unsigned long long)g_nj_declined.load(),
               (unsigned long long)g_nj_twice_same.load(), (unsigned long long)g_nj_twice_differ.load());
     geom_sk_report();
+    if (g_op0_native.load() + g_op0_declined.load() + g_op0_same.load() + g_op0_differ.load() + g_op0_skipped.load())
+        LOG_I("geom op0: %llu native, %llu declined; check %llu same, %llu differ, %llu skipped (waits)", (unsigned long long)g_op0_native.load(),
+              (unsigned long long)g_op0_declined.load(), (unsigned long long)g_op0_same.load(), (unsigned long long)g_op0_differ.load(),
+              (unsigned long long)g_op0_skipped.load());
     if (getenv("F1CE_GEOM_PC_HIST"))
         if (FILE* f = fopen("op0_hist.txt", "w")) {
             for (u32 i = 0; i < 0x10000; i++) if (const u32 n = g_pc_hist[i].load()) fprintf(f, "%05x %u\n", i * 4, n);

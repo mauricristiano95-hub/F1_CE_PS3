@@ -371,7 +371,19 @@ run ~5.7 us (op0 2.1, job entry 0.9, op37 0.46, op12 0.44, op35 0.31, op4 0.30, 
   code over the whole protocol (command block, done-record windows, in-order kick); the remaining loops (6 done
   records, 0x9108 / 0x9138) are worth ~50 ns. A native op0 would save another ~1 us a job at the risk of the
   completion protocol.
-- Left: op0's protocol (see above), op37 (its first
+- op0 native (2026-11-27, `runtime/geom_op0.cpp`, `F1CE_GEOM_OP0=0` turns it off): the whole handler for the path
+  every piece takes (declined before any side effect otherwise: ctx[528] / ctx[1136] set, params words 40 / 44 set,
+  no output buffer yet, or a 0x4C18 allocation that would flush). Its parts and their semantics are in the file's
+  header; the completion is a small state machine over the in-order line (lock word 0, count word 4, kick address
+  word 8, words 12 / 13) and the six done records. Pitfall: the `or` at 0x92C4 reads r9 one instruction before 0x92C8
+  sets it, so the lock is tried when the line is free and the job is in order. Check (`F1CE_GEOM_OP0_CHECK=1`):
+  native and SPU code from the same state, both with dry DMA, the ring line, the in-order line and the done records
+  read from one snapshot (`SPUThread::dry_overlay`), every MFC command with the data it puts or stores and the local
+  store compared; a run that waits for another SPU (the snapshot does not move) is stopped after a few GETLLARs and
+  only the commands up to there are compared: 1.03M runs, 0 differences, ~200 waits, all alike. Not reachable in the
+  dry mode (its conditional stores succeed): the retries after a lost reservation (ring and lock: back to the
+  GETLLAR, read in the code). op0 1.58 -> 0.73 us, the job's run 5.7 -> 3.5 us.
+- Left: op37 (its first
   allocation initialises the output buffer through the job manager's services +0x30 / +0x34), the job's entry (0.9).
   The SpinLock in the profile (2.6%) is contention on the queue / in-order line atomics.
 

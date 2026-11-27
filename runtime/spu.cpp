@@ -541,11 +541,23 @@ void SPUThread::dma(u32 cmd) {
             memcpy(dry_line, ls + (lsa & 0x3FF80), 128);
             return;
         }
+        auto overlay = [&](u32 line) -> const u8* {
+            if (dry_overlay)
+                for (u32 i = 0; i < dry_overlay->n; i++)
+                    if (dry_overlay->ea[i] == line) return dry_overlay->data[i];
+            return nullptr;
+        };
         if (c8 == 0xD0) {   // without waiting for the line's lock (a check may hold it to keep the line still)
             ea &= ~127u;
-            memcpy(res_data, ea == dry_line_ea ? dry_line : gmem(ea), 128);
+            const u8* ov = overlay(ea);
+            memcpy(res_data, ea == dry_line_ea ? dry_line : ov ? ov : gmem(ea), 128);
             write_ls(lsa & 0x3FF80, res_data, 128);
             res_addr = ea; res_gen = line_generation(ea); has_reservation = true; atomic_stat = 4;
+            return;
+        }
+        if ((c8 & 0xF4) == 0x40 && dry_overlay && size <= 128 && overlay(ea & ~127u) && ((ea + size - 1) & ~127u) == (ea & ~127u) &&
+            (ea & ~127u) != dry_line_ea) {
+            write_ls(lsa, overlay(ea & ~127u) + (ea & 127), size);
             return;
         }
         if ((c8 & 0xF4) == 0x40 && dry_line_ea != ~0u && ea < dry_line_ea + 128 && ea + size > dry_line_ea) {
