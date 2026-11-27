@@ -90,6 +90,8 @@ set(RUNTIME_SOURCES
   runtime/spu_pm.cpp
   runtime/hle_geom.cpp
   runtime/geom_native_job.cpp
+  runtime/geom_skin_job.cpp
+  runtime/geom_op0.cpp
 )
 if(F1CE_HOST STREQUAL "SDL")
   list(APPEND RUNTIME_SOURCES runtime/host_sdl.cpp runtime/wheel_sdl.cpp runtime/rsx.cpp runtime/rsx_common.cpp runtime/rsx_gl.cpp)

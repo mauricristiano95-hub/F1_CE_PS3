@@ -27,7 +27,9 @@ HEAT_INDEX = {}   # block key -> counter index
 IDIOMS = {(0x04AE4, 0x38944402, 7): "spu_idiom_fill_word",
           (0x08910, 0x1801C385, 10): "spu_idiom_ramp_u16",
           (0x0E3F0, 0x38940282, 10): "spu_idiom_age_table",
-          (0x05778, 0x76A6C303, 78): "spu_idiom_audio_voice"}
+          (0x05778, 0x76A6C303, 78): "spu_idiom_audio_voice",
+          (0x09838, 0x1800E906, 10): "spu_idiom_copy_words",   # geometry job op0 (generated code only)
+          (0x08E08, 0x34000802, 29): "spu_idiom_skip_records"}
 
 
 # optional shortcuts at a block's head: the helper returns true after setting pc to where to continue

@@ -1254,6 +1254,11 @@ void start_host_profiler() {
         std::sort(top.rbegin(), top.rend());
         for (size_t i = 0; i < top.size() && i < 25; i++)
             LOG_I("host profile rva %llx %5.2f%%", (unsigned long long)top[i].second, 100.0 * top[i].first / std::max<u64>(total, 1));
+        if (getenv("F1CE_HOST_PROFILE_DUMP"))   // every sampled address: host_profile_hits.txt (rva, samples)
+            if (FILE* f = fopen("host_profile_hits.txt", "w")) {
+                for (auto& [n, rva] : top) fprintf(f, "%llx %llu\n", (unsigned long long)rva, (unsigned long long)n);
+                fclose(f);
+            }
     }).detach();
 }
 #else

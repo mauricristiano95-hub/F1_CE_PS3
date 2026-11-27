@@ -390,6 +390,8 @@ void SPUThread::run() {
     run_until(~0u);
 }
 
+// debug (hle_geom.cpp F1CE_GEOM_PC_HIST): per-word instruction counts while set, in the per-instruction mode
+thread_local std::atomic<u32>* t_spu_pc_hist = nullptr;
 void SPUThread::run_until(u32 stop) {
     static const bool per_instruction = getenv("F1CE_SPU_NOBLOCK") || !g_pc_log.empty();
     while (!halted && pc != stop) {
@@ -403,6 +405,7 @@ void SPUThread::run_until(u32 stop) {
         }
         if (per_instruction) {
             if (__builtin_expect(!g_pc_log.empty(), 0) && g_pc_log[(pc & 0x3FFFC) >> 2]) pc_log(*this);
+            if (__builtin_expect(t_spu_pc_hist != nullptr, 0)) t_spu_pc_hist[(pc & 0x3FFFC) >> 2].fetch_add(1, std::memory_order_relaxed);
             u32 w;
             memcpy(&w, ls + (pc & 0x3FFFC), 4);
             w = __builtin_bswap32(w);
@@ -538,11 +541,23 @@ void SPUThread::dma(u32 cmd) {
             memcpy(dry_line, ls + (lsa & 0x3FF80), 128);
             return;
         }
+        auto overlay = [&](u32 line) -> const u8* {
+            if (dry_overlay)
+                for (u32 i = 0; i < dry_overlay->n; i++)
+                    if (dry_overlay->ea[i] == line) return dry_overlay->data[i];
+            return nullptr;
+        };
         if (c8 == 0xD0) {   // without waiting for the line's lock (a check may hold it to keep the line still)
             ea &= ~127u;
-            memcpy(res_data, ea == dry_line_ea ? dry_line : gmem(ea), 128);
+            const u8* ov = overlay(ea);
+            memcpy(res_data, ea == dry_line_ea ? dry_line : ov ? ov : gmem(ea), 128);
             write_ls(lsa & 0x3FF80, res_data, 128);
             res_addr = ea; res_gen = line_generation(ea); has_reservation = true; atomic_stat = 4;
+            return;
+        }
+        if ((c8 & 0xF4) == 0x40 && dry_overlay && size <= 128 && overlay(ea & ~127u) && ((ea + size - 1) & ~127u) == (ea & ~127u) &&
+            (ea & ~127u) != dry_line_ea) {
+            write_ls(lsa, overlay(ea & ~127u) + (ea & 127), size);
             return;
         }
         if ((c8 & 0xF4) == 0x40 && dry_line_ea != ~0u && ea < dry_line_ea + 128 && ea + size > dry_line_ea) {

@@ -221,6 +221,10 @@ struct SPUThread {
     std::vector<SpuDmaRec>* dma_log = nullptr;
     u32 dry_line_ea = ~0u;   // with dma_log: the line its conditional stores wrote, kept here instead of in memory
     u8 dry_line[128];
+    // with dma_log (checks): lines read from these copies instead of memory, so that two dry runs see the same data
+    // (GETLLAR and GETs inside them; a line the run stored itself, dry_line, wins)
+    struct DryOverlay { u32 ea[4]; u8 data[4][128]; u32 n = 0; };
+    const DryOverlay* dry_overlay = nullptr;
     // this thread runs the game's job manager policy module: its native functions may replace the SPU code (spu_pm.cpp)
     bool pm_native = false;
 
