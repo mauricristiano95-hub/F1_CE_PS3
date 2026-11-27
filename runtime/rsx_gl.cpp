@@ -30,6 +30,7 @@
 #include <vector>
 
 extern u64 g_rsx_idle_us;   // hle_gcm.cpp: time the FIFO reader waited for commands (profiling)
+bool gfx_skip_program(u64 fh);   // hle_gfxopts.cpp: draws left out (motion blur off: its plain copy pass)
 namespace rsx {
 namespace gl {
 void zpass_service();
@@ -2383,7 +2384,8 @@ void draw(bool indexed) {
         if (ds && g_frame >= ds_frame && g_frame < ds_frame + ds_n) sleep_usec(ds_us);
     }
     u64 tdr = prof_usec();
-    glDrawElementsBaseVertex(mode, (GLsizei)idx_count, GL_UNSIGNED_INT, (const void*)idx_offset, g_vtx_gpu ? 0 : (GLint)vtx_shift - (GLint)min_v);
+    if (!gfx_skip_program(p->fh))
+        glDrawElementsBaseVertex(mode, (GLsizei)idx_count, GL_UNSIGNED_INT, (const void*)idx_offset, g_vtx_gpu ? 0 : (GLint)vtx_shift - (GLint)min_v);
     if (g_idx_rebind) { glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_iheap.buf); g_idx_rebind = false; }
     g_prof.t_draw += prof_usec() - tdr;
     if (target->main_ea) target->wb_dirty = true;

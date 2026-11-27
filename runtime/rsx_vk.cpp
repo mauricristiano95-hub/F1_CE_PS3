@@ -45,6 +45,7 @@
 #include <vector>
 
 extern u64 g_rsx_idle_us;   // hle_gcm.cpp: time the FIFO reader waited for commands (profiling)
+bool gfx_skip_program(u64 fh);   // hle_gfxopts.cpp: draws left out (motion blur off: its plain copy pass)
 namespace rsx {
 namespace vk {
 void zpass_service();
@@ -138,7 +139,7 @@ constexpr u64 GPU_UPLOADS = 0, GPU_OTHER = 1;
 // F1CE_GPU_DRAW_PROF=1: inside the passes, a timestamp whenever the program changes; such labels have bit 63 set
 // (vertex program id, fragment hash), and g_draw_tex keeps the texture of unit 0 at their first draw
 const bool g_draw_prof = getenv("F1CE_GPU_DRAW_PROF") != nullptr;
-std::unordered_map<u64, u32> g_draw_tex;
+std::unordered_map<u64, std::pair<u32, u32>> g_draw_tex;   // (texture of unit 0, target)
 bool g_ts_ok = false;
 void gpu_mark(u64 label) {
     Slot& s = g_slots[g_slot];
@@ -1856,10 +1857,19 @@ void draw(bool indexed) {
         vkCmdBindDescriptorSets(g_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_pl, 0, 1, &g_set0, 3, dyn);
         memcpy(g_dyn.set0, dyn, sizeof(dyn));
     }
+    static const u64 skip_fp = getenv("F1CE_SKIP_FP") ? strtoull(getenv("F1CE_SKIP_FP"), nullptr, 16) : 0;   // debug: one program's draws left out
+    if ((skip_fp && (p->fh & 0xFFFFFFFFFFFFull) == skip_fp) || gfx_skip_program(p->fh)) return;   // (hle_gfxopts.cpp)
     if (g_draw_prof) {
         const u64 lab = 1ull << 63 | (u64)(p->vs_id & 0x7FFF) << 48 | (p->fh & 0xFFFFFFFFFFFFull);
         Slot& sl = g_slots[g_slot];
-        if (!sl.tused || sl.tlabel[sl.tused - 1] != lab) { gpu_mark(lab); g_draw_tex.emplace(lab, reg(0x1A00)); }
+        if (!sl.tused || sl.tlabel[sl.tused - 1] != lab) {
+            gpu_mark(lab);
+            if (g_draw_tex.emplace(lab, std::make_pair(reg(0x1A00), target->offset)).second && p->fs) {   // the shader, once
+                char fn[48];
+                snprintf(fn, sizeof(fn), "fp%012llx.glsl", (unsigned long long)(lab & 0xFFFFFFFFFFFFull));
+                if (FILE* f = fopen(fn, "w")) { fputs(p->fs->c_str(), f); fclose(f); }
+            }
+        }
     }
     u64 tdr = prof_usec();
     vkCmdDrawIndexed(g_cb, geom.idx_count, 1, (u32)(geom.idx_offset / 4), 0, 0);
@@ -2004,7 +2014,8 @@ std::string gpu_label(u64 k) {
     char b[80];
     if (k >> 63) {
         auto it = g_draw_tex.find(k);
-        snprintf(b, sizeof(b), "vp%u fp%012llx tex0 %08x", (u32)(k >> 48 & 0x7FFF), (unsigned long long)(k & 0xFFFFFFFFFFFFull), it != g_draw_tex.end() ? it->second : 0);
+        snprintf(b, sizeof(b), "fp%012llx tex0 %08x -> %08x", (unsigned long long)(k & 0xFFFFFFFFFFFFull), it != g_draw_tex.end() ? it->second.first : 0,
+                 it != g_draw_tex.end() ? it->second.second : 0);
         return b;
     }
     snprintf(b, sizeof(b), "%08x %ux%u%s", (u32)(k >> 32), (u32)(k >> 18 & 0x3FFF), (u32)(k >> 4 & 0x3FFF), k & 2 ? " msaa" : "");
